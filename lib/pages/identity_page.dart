@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:qr_flutter/qr_flutter.dart';
+import '../services/biometric_service.dart';
 import '../services/seed_service.dart';
 import '../services/session_service.dart';
 import '../services/vault_service.dart';
@@ -20,11 +21,82 @@ class IdentityPage extends StatefulWidget {
 class _IdentityPageState extends State<IdentityPage> {
   bool _copiedKey = false;
   Timer? _copyTimer;
+  bool _biometricEnabled = false;
+  bool _biometricAvailable = true;
+  bool _biometricBusy = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadBiometricState();
+  }
 
   @override
   void dispose() {
     _copyTimer?.cancel();
     super.dispose();
+  }
+
+  Future<void> _loadBiometricState() async {
+    final enabled = await SeedService.isBiometricEnabled();
+    final available = await BiometricService.isAvailable();
+    if (!mounted) return;
+    setState(() {
+      _biometricEnabled = enabled;
+      _biometricAvailable = available;
+    });
+  }
+
+  void _showSnack(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  Future<void> _toggleBiometric(bool value) async {
+    if (_biometricBusy) return;
+
+    if (!value) {
+      setState(() => _biometricBusy = true);
+      try {
+        await SeedService.disableBiometric();
+        if (!mounted) return;
+        setState(() => _biometricEnabled = false);
+        _showSnack('Biometric unlock disabled.');
+      } catch (_) {
+        if (mounted) _showSnack('Could not update biometric settings.');
+      } finally {
+        if (mounted) setState(() => _biometricBusy = false);
+      }
+      return;
+    }
+
+    final seed = SessionService.masterSeed;
+    if (seed == null) {
+      _showSnack('Unlock the vault before enabling biometric unlock.');
+      return;
+    }
+    if (!_biometricAvailable) {
+      _showSnack('Biometric authentication is not available on this device.');
+      return;
+    }
+
+    setState(() => _biometricBusy = true);
+    try {
+      final confirmed = await BiometricService.authenticate(
+        reason: 'Confirm your identity to enable biometric unlock',
+      );
+      if (!confirmed) return;
+      await SeedService.enableBiometric(seed);
+      if (!mounted) return;
+      setState(() => _biometricEnabled = true);
+      _showSnack('Biometric unlock enabled.');
+    } catch (_) {
+      if (mounted) _showSnack('Could not update biometric settings.');
+    } finally {
+      if (mounted) setState(() => _biometricBusy = false);
+    }
   }
 
   void _copyPublicKey() {
@@ -132,7 +204,9 @@ class _IdentityPageState extends State<IdentityPage> {
                 labelText: label,
                 labelStyle: TextStyle(color: secondaryColor, fontSize: 14),
                 enabledBorder: UnderlineInputBorder(
-                  borderSide: BorderSide(color: isDark ? Colors.white24 : Colors.black26),
+                  borderSide: BorderSide(
+                    color: isDark ? Colors.white24 : Colors.black26,
+                  ),
                 ),
                 focusedBorder: UnderlineInputBorder(
                   borderSide: BorderSide(color: primaryColor),
@@ -190,7 +264,10 @@ class _IdentityPageState extends State<IdentityPage> {
                           alignment: Alignment.centerLeft,
                           child: Text(
                             errorText!,
-                            style: const TextStyle(color: Colors.redAccent, fontSize: 13),
+                            style: const TextStyle(
+                              color: Colors.redAccent,
+                              fontSize: 13,
+                            ),
                           ),
                         ),
                       ],
@@ -217,7 +294,8 @@ class _IdentityPageState extends State<IdentityPage> {
 
                             if (newPass.length < 8) {
                               setDialogState(() {
-                                errorText = 'New passphrase must be at least 8 characters';
+                                errorText =
+                                    'New passphrase must be at least 8 characters';
                               });
                               return;
                             }
@@ -256,10 +334,7 @@ class _IdentityPageState extends State<IdentityPage> {
                             height: 14,
                             child: CircularProgressIndicator(strokeWidth: 2),
                           )
-                        : Text(
-                            'Save',
-                            style: TextStyle(color: primaryColor),
-                          ),
+                        : Text('Save', style: TextStyle(color: primaryColor)),
                   ),
               ],
             );
@@ -307,7 +382,10 @@ class _IdentityPageState extends State<IdentityPage> {
                     if (exportedHex == null) ...[
                       Text(
                         'Confirm your passphrase to reveal your 32-byte master seed.',
-                        style: TextStyle(color: secondaryColor, fontSize: AppSizes.subtitle),
+                        style: TextStyle(
+                          color: secondaryColor,
+                          fontSize: AppSizes.subtitle,
+                        ),
                       ),
                       const SizedBox(height: 16),
                       TextField(
@@ -316,9 +394,14 @@ class _IdentityPageState extends State<IdentityPage> {
                         style: TextStyle(color: primaryColor),
                         decoration: InputDecoration(
                           labelText: 'Passphrase',
-                          labelStyle: TextStyle(color: secondaryColor, fontSize: 14),
+                          labelStyle: TextStyle(
+                            color: secondaryColor,
+                            fontSize: 14,
+                          ),
                           enabledBorder: UnderlineInputBorder(
-                            borderSide: BorderSide(color: isDark ? Colors.white24 : Colors.black26),
+                            borderSide: BorderSide(
+                              color: isDark ? Colors.white24 : Colors.black26,
+                            ),
                           ),
                           focusedBorder: UnderlineInputBorder(
                             borderSide: BorderSide(color: primaryColor),
@@ -329,19 +412,27 @@ class _IdentityPageState extends State<IdentityPage> {
                         const SizedBox(height: 12),
                         Text(
                           errorText!,
-                          style: const TextStyle(color: Colors.redAccent, fontSize: 13),
+                          style: const TextStyle(
+                            color: Colors.redAccent,
+                            fontSize: 13,
+                          ),
                         ),
                       ],
                     ] else ...[
                       Text(
                         'Keep this master seed strictly confidential:',
-                        style: TextStyle(color: secondaryColor, fontSize: AppSizes.subtitle),
+                        style: TextStyle(
+                          color: secondaryColor,
+                          fontSize: AppSizes.subtitle,
+                        ),
                       ),
                       const SizedBox(height: 12),
                       Container(
                         padding: const EdgeInsets.all(12),
                         decoration: BoxDecoration(
-                          border: Border.all(color: Theme.of(context).dividerColor),
+                          border: Border.all(
+                            color: Theme.of(context).dividerColor,
+                          ),
                         ),
                         child: SelectableText(
                           exportedHex!,
@@ -381,7 +472,10 @@ class _IdentityPageState extends State<IdentityPage> {
                         : () async {
                             final pass = passCtrl.text.trim();
                             if (pass.isEmpty) {
-                              setDialogState(() => errorText = 'Please enter your passphrase');
+                              setDialogState(
+                                () =>
+                                    errorText = 'Please enter your passphrase',
+                              );
                               return;
                             }
 
@@ -393,7 +487,9 @@ class _IdentityPageState extends State<IdentityPage> {
                             final seed = await SeedService.getMasterSeed(pass);
                             if (seed != null) {
                               final hex = seed
-                                  .map((b) => b.toRadixString(16).padLeft(2, '0'))
+                                  .map(
+                                    (b) => b.toRadixString(16).padLeft(2, '0'),
+                                  )
                                   .join();
                               setDialogState(() {
                                 inProgress = false;
@@ -412,10 +508,7 @@ class _IdentityPageState extends State<IdentityPage> {
                             height: 14,
                             child: CircularProgressIndicator(strokeWidth: 2),
                           )
-                        : Text(
-                            'Reveal',
-                            style: TextStyle(color: primaryColor),
-                          ),
+                        : Text('Reveal', style: TextStyle(color: primaryColor)),
                   )
                 else
                   TextButton(
@@ -504,18 +597,13 @@ class _IdentityPageState extends State<IdentityPage> {
     final keyHex = SessionService.publicKeyHex;
 
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Identity'),
-      ),
+      appBar: AppBar(title: const Text('Identity')),
       body: ListView(
         children: [
           ListTile(
             title: Text(
               'Public Key',
-              style: TextStyle(
-                fontSize: AppSizes.title,
-                color: primaryColor,
-              ),
+              style: TextStyle(fontSize: AppSizes.title, color: primaryColor),
             ),
             subtitle: Text(
               _copiedKey
@@ -538,7 +626,11 @@ class _IdentityPageState extends State<IdentityPage> {
           const Divider(height: 1),
 
           ListTile(
-            leading: Icon(Icons.qr_code, size: AppSizes.icon, color: primaryColor),
+            leading: Icon(
+              Icons.qr_code,
+              size: AppSizes.icon,
+              color: primaryColor,
+            ),
             title: Text(
               'Show QR Code',
               style: TextStyle(fontSize: AppSizes.title, color: primaryColor),
@@ -572,7 +664,11 @@ class _IdentityPageState extends State<IdentityPage> {
           ),
 
           ListTile(
-            leading: Icon(Icons.password, size: AppSizes.icon, color: primaryColor),
+            leading: Icon(
+              Icons.password,
+              size: AppSizes.icon,
+              color: primaryColor,
+            ),
             title: Text(
               'Change Passphrase',
               style: TextStyle(fontSize: AppSizes.title, color: primaryColor),
@@ -580,17 +676,51 @@ class _IdentityPageState extends State<IdentityPage> {
             onTap: _showChangePassphraseDialog,
           ),
           ListTile(
-            leading: Icon(Icons.fingerprint, size: AppSizes.icon, color: primaryColor),
+            leading: Icon(
+              Icons.fingerprint,
+              size: AppSizes.icon,
+              color: primaryColor,
+            ),
             title: Text(
               'Biometric Unlock',
               style: TextStyle(fontSize: AppSizes.title, color: primaryColor),
             ),
-            onTap: () {
-              // Placeholder for biometrics toggle or settings dialog
-            },
+            subtitle: Text(
+              _biometricEnabled
+                  ? 'Unlock with your fingerprint or face'
+                  : _biometricAvailable
+                  ? 'Use your fingerprint or face to unlock'
+                  : 'Not available on this device',
+              style: TextStyle(color: secondaryTextColor, fontSize: 12),
+            ),
+            trailing: _biometricBusy
+                ? const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : Switch(
+                    value: _biometricEnabled,
+                    onChanged: _toggleBiometric,
+                    activeThumbColor: isDark ? Colors.white : Colors.black,
+                    activeTrackColor: isDark ? Colors.white38 : Colors.black26,
+                    inactiveThumbColor: isDark
+                        ? Colors.white54
+                        : Colors.grey[400],
+                    inactiveTrackColor: isDark
+                        ? Colors.white24
+                        : Colors.grey[300],
+                  ),
+            onTap: _biometricBusy
+                ? null
+                : () => _toggleBiometric(!_biometricEnabled),
           ),
           ListTile(
-            leading: Icon(Icons.download, size: AppSizes.icon, color: primaryColor),
+            leading: Icon(
+              Icons.download,
+              size: AppSizes.icon,
+              color: primaryColor,
+            ),
             title: Text(
               'Export Seed',
               style: TextStyle(fontSize: AppSizes.title, color: primaryColor),

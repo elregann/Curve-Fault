@@ -24,7 +24,8 @@ android {
         applicationId = "com.CurveFault.curve_fault"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
-        minSdk = flutter.minSdkVersion
+        // local_auth requires API 24 and a FragmentActivity.
+        minSdk = 24
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
@@ -41,6 +42,7 @@ android {
 
 dependencies {
     implementation("androidx.documentfile:documentfile:1.0.1")
+    implementation("androidx.appcompat:appcompat:1.7.1")
 }
 
 flutter {

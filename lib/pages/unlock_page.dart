@@ -1,4 +1,7 @@
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
+import '../services/biometric_service.dart';
 import '../services/seed_service.dart';
 import '../services/session_service.dart';
 import '../services/vault_service.dart';
@@ -18,6 +21,75 @@ class _UnlockPageState extends State<UnlockPage> {
   bool _obscure = true;
   bool _isLoading = false;
   String? _error;
+  bool _biometricEnabled = false;
+  bool _biometricPrompted = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _prepareBiometric());
+  }
+
+  Future<void> _prepareBiometric() async {
+    final enabled = await SeedService.isBiometricEnabled();
+    if (!mounted) return;
+    setState(() => _biometricEnabled = enabled);
+    if (!enabled || _biometricPrompted) return;
+
+    final available = await BiometricService.isAvailable();
+    if (!mounted || !available) return;
+    _biometricPrompted = true;
+    await _unlockWithBiometrics();
+  }
+
+  Future<void> _unlockWithBiometrics() async {
+    if (_isLoading) return;
+    setState(() {
+      _isLoading = true;
+      _error = null;
+    });
+
+    try {
+      final confirmed = await BiometricService.authenticate(
+        reason: 'Unlock CurveVault with biometrics',
+      );
+      if (!confirmed) {
+        if (mounted) setState(() => _isLoading = false);
+        return;
+      }
+
+      final seed = await SeedService.getBiometricSeed();
+      if (seed == null) {
+        if (mounted) {
+          setState(() {
+            _isLoading = false;
+            _error = 'Biometric unlock is not set up. Use your passphrase.';
+          });
+        }
+        return;
+      }
+
+      await _completeUnlock(seed);
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+          _error = 'Biometric unlock failed';
+        });
+      }
+    }
+  }
+
+  Future<void> _completeUnlock(Uint8List seed) async {
+    // Initialize runtime in-memory session with decrypted master seed
+    SessionService.setSession(seed);
+    await VaultService.instance.unlock(seed);
+
+    if (!mounted) return;
+    Navigator.of(
+      context,
+    ).pushReplacement(MaterialPageRoute(builder: (_) => const MainShell()));
+  }
 
   Future<void> _unlock() async {
     final pass = _passController.text.trim();
@@ -43,14 +115,16 @@ class _UnlockPageState extends State<UnlockPage> {
         return;
       }
 
-      // Initialize runtime in-memory session with decrypted master seed
-      SessionService.setSession(seed);
-      await VaultService.instance.unlock(seed);
+      // Keep the biometric copy in sync after a passphrase unlock.
+      try {
+        if (await SeedService.isBiometricEnabled()) {
+          await SeedService.enableBiometric(seed);
+        }
+      } catch (_) {
+        // Biometric sync is best-effort; the passphrase still unlocks the vault.
+      }
 
-      if (!mounted) return;
-      Navigator.of(context).pushReplacement(
-        MaterialPageRoute(builder: (_) => const MainShell()),
-      );
+      await _completeUnlock(seed);
     } catch (e) {
       setState(() {
         _error = 'Failed to unlock';
@@ -65,7 +139,11 @@ class _UnlockPageState extends State<UnlockPage> {
     super.dispose();
   }
 
-  InputDecoration _inputDecoration(BuildContext context, String label, {Widget? suffix}) {
+  InputDecoration _inputDecoration(
+    BuildContext context,
+    String label, {
+    Widget? suffix,
+  }) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final hintColor = isDark ? Colors.white54 : Colors.black54;
     final borderColor = isDark ? Colors.white24 : Colors.black26;
@@ -73,10 +151,7 @@ class _UnlockPageState extends State<UnlockPage> {
 
     return InputDecoration(
       labelText: label,
-      labelStyle: TextStyle(
-        color: hintColor,
-        fontSize: AppSizes.subtitle,
-      ),
+      labelStyle: TextStyle(color: hintColor, fontSize: AppSizes.subtitle),
       floatingLabelStyle: TextStyle(
         color: focusedColor,
         fontSize: AppSizes.subtitle,
@@ -104,9 +179,7 @@ class _UnlockPageState extends State<UnlockPage> {
 
     return Scaffold(
       backgroundColor: Theme.of(context).scaffoldBackgroundColor,
-      appBar: AppBar(
-        title: const Text('Unlock'),
-      ),
+      appBar: AppBar(title: const Text('Unlock')),
       body: ListView(
         padding: const EdgeInsets.symmetric(
           horizontal: AppSizes.listPaddingHorizontal,
@@ -131,6 +204,41 @@ class _UnlockPageState extends State<UnlockPage> {
               height: 1.4,
             ),
           ),
+
+          if (_biometricEnabled) ...[
+            const SizedBox(height: 20),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(
+                Icons.fingerprint,
+                size: AppSizes.icon,
+                color: primaryTextColor,
+              ),
+              title: Text(
+                'Unlock with Biometrics',
+                style: TextStyle(
+                  fontSize: AppSizes.subtitle + 1,
+                  color: primaryTextColor,
+                ),
+              ),
+              trailing: _isLoading
+                  ? SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: secondaryTextColor,
+                      ),
+                    )
+                  : Icon(
+                      Icons.arrow_forward,
+                      color: primaryTextColor,
+                      size: AppSizes.icon,
+                    ),
+              onTap: _isLoading ? null : _unlockWithBiometrics,
+            ),
+            Divider(color: Theme.of(context).dividerColor),
+          ],
 
           const SizedBox(height: 40),
 

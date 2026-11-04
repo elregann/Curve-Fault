@@ -225,6 +225,10 @@ class _VaultPageState extends State<VaultPage> {
                     ),
                     IconButton(
                       icon: const Icon(Icons.close),
+                      splashColor: Colors.transparent,
+                      highlightColor: Colors.transparent,
+                      hoverColor: Colors.transparent,
+                      focusColor: Colors.transparent,
                       onPressed: () => Navigator.of(ctx).pop(),
                     ),
                   ],
