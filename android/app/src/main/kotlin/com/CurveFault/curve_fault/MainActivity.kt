@@ -154,6 +154,24 @@ class MainActivity : FlutterActivity() {
                             }
                         }
                     }
+                    "restoreDocument" -> {
+                        val uri = call.argument<String>("uri")
+                        val plaintextPath = call.argument<String>("plaintextPath")
+                        val backupPath = call.argument<String>("backupPath")
+                        val displayName = call.argument<String>("displayName")
+                        if (uri == null || plaintextPath == null || backupPath == null || displayName == null) {
+                            result.error("bad_args", "Missing restore arguments", null)
+                        } else {
+                            runBackground(result) {
+                                restoreDocument(
+                                    Uri.parse(uri),
+                                    plaintextPath,
+                                    backupPath,
+                                    displayName,
+                                )
+                            }
+                        }
+                    }
                     "deleteDocument" -> {
                         val uri = call.argument<String>("uri")
                         if (uri == null) result.error("bad_args", "Missing uri", null)
@@ -588,6 +606,102 @@ class MainActivity : FlutterActivity() {
             // The plaintext backup is still in app-private storage. Try to put
             // the original bytes and name back before surfacing the failure.
             if (wroteContainer) {
+                try {
+                    contentResolver.openOutputStream(uri, "wt")?.use { target ->
+                        File(backupPath).inputStream().use { source ->
+                            source.copyTo(target, 64 * 1024)
+                        }
+                        target.flush()
+                    }
+                } catch (_: Exception) {
+                    // Best effort only.
+                }
+            }
+            if (renamedUri != null) {
+                try {
+                    DocumentsContract.renameDocument(
+                        contentResolver,
+                        renamedUri,
+                        originalName,
+                    )
+                } catch (_: Exception) {
+                    // Best effort only.
+                }
+            }
+            if (oldPath != null) {
+                refreshMedia(oldPath, oldPath)
+            }
+            throw error
+        }
+    }
+
+    private fun restoreDocument(
+        uri: Uri,
+        plaintextPath: String,
+        backupPath: String,
+        displayName: String,
+    ): Map<String, Any?> {
+        val original = describeUri(uri)
+        val originalName = original["name"] as String
+        val oldPath = resolveMediaPath(uri)
+        var renamedUri: Uri? = null
+        var wrotePlaintext = false
+
+        try {
+            // Overwrite the container with the decrypted bytes first.
+            val output = contentResolver.openOutputStream(uri, "wt")
+                ?: throw IOException("Could not open the encrypted file for writing")
+            output.use { target ->
+                File(plaintextPath).inputStream().use { source ->
+                    source.copyTo(target, 64 * 1024)
+                }
+                target.flush()
+            }
+            wrotePlaintext = true
+
+            // Rename last so the plaintext is only visible under its real name
+            // once the write has fully succeeded.
+            renamedUri = try {
+                DocumentsContract.renameDocument(contentResolver, uri, displayName)
+            } catch (_: Exception) {
+                null
+            }
+            if (renamedUri == null) {
+                throw IOException("This location does not allow renaming files")
+            }
+
+            // Keep the tree-form URI so the persisted folder grant still covers
+            // the restored document after the app restarts.
+            val resultUri = if (DocumentsContract.isTreeUri(uri)) {
+                val newDocId = DocumentsContract.getDocumentId(renamedUri)
+                DocumentsContract.buildDocumentUriUsingTree(uri, newDocId)
+            } else {
+                renamedUri
+            }
+
+            try {
+                contentResolver.takePersistableUriPermission(
+                    resultUri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                        Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+                )
+            } catch (_: Exception) {
+                // Ignore providers that refuse a persistable grant.
+            }
+
+            val newPath = oldPath?.let { path ->
+                File(path).parentFile?.let { File(it, displayName).absolutePath }
+            }
+            refreshMedia(oldPath, newPath)
+            return mapOf(
+                "uri" to resultUri.toString(),
+                "name" to displayName,
+                "size" to File(plaintextPath).length(),
+            )
+        } catch (error: Throwable) {
+            // Put the encrypted container bytes and name back so the vault entry
+            // stays usable when the restore fails.
+            if (wrotePlaintext) {
                 try {
                     contentResolver.openOutputStream(uri, "wt")?.use { target ->
                         File(backupPath).inputStream().use { source ->

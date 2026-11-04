@@ -125,14 +125,15 @@ class NativeStorage {
     bool recursive = true,
   }) async {
     _requireSupport();
-    final result = await _channel.invokeMethod<List<dynamic>>(
-      'listDocuments',
-      {'treeUri': treeUri, 'recursive': recursive},
-    );
+    final result = await _channel.invokeMethod<List<dynamic>>('listDocuments', {
+      'treeUri': treeUri,
+      'recursive': recursive,
+    });
     if (result == null) return const [];
-    return result.whereType<Map>().map(NativeDocument.fromMap).toList(
-          growable: false,
-        );
+    return result
+        .whereType<Map>()
+        .map(NativeDocument.fromMap)
+        .toList(growable: false);
   }
 
   /// Reads metadata for a single content URI.
@@ -174,17 +175,41 @@ class NativeStorage {
     required String displayName,
   }) async {
     _requireSupport();
-    final result = await _channel.invokeMethod<Map<dynamic, dynamic>>(
-      'replaceDocument',
-      {
-        'uri': uri,
-        'containerPath': containerPath,
-        'backupPath': backupPath,
-        'displayName': displayName,
-      },
-    );
+    final result = await _channel
+        .invokeMethod<Map<dynamic, dynamic>>('replaceDocument', {
+          'uri': uri,
+          'containerPath': containerPath,
+          'backupPath': backupPath,
+          'displayName': displayName,
+        });
     if (result == null) {
       throw StateError('Could not replace document');
+    }
+    return LockedDocument.fromMap(result);
+  }
+
+  /// Writes [plaintextPath] over the encrypted document at [uri] and renames
+  /// it back to [displayName].
+  ///
+  /// The container bytes at [backupPath] are written back if the operation
+  /// fails, so a failed restore never leaves a half-written plaintext file
+  /// behind.
+  static Future<LockedDocument> restoreDocument({
+    required String uri,
+    required String plaintextPath,
+    required String backupPath,
+    required String displayName,
+  }) async {
+    _requireSupport();
+    final result = await _channel
+        .invokeMethod<Map<dynamic, dynamic>>('restoreDocument', {
+          'uri': uri,
+          'plaintextPath': plaintextPath,
+          'backupPath': backupPath,
+          'displayName': displayName,
+        });
+    if (result == null) {
+      throw StateError('Could not restore document');
     }
     return LockedDocument.fromMap(result);
   }

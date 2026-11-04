@@ -115,6 +115,15 @@ class _VaultPageState extends State<VaultPage> {
                   onTap: () => Navigator.of(ctx).pop('save'),
                 ),
                 ListTile(
+                  leading: Icon(Icons.restore, color: primaryColor),
+                  title: Text('Restore', style: TextStyle(color: primaryColor)),
+                  subtitle: Text(
+                    'Decrypt and put the original file back',
+                    style: TextStyle(color: secondaryColor, fontSize: 12),
+                  ),
+                  onTap: () => Navigator.of(ctx).pop('restore'),
+                ),
+                ListTile(
                   leading: Icon(Icons.share_outlined, color: primaryColor),
                   title: Text('Share', style: TextStyle(color: primaryColor)),
                   onTap: () => Navigator.of(ctx).pop('share'),
@@ -170,6 +179,8 @@ class _VaultPageState extends State<VaultPage> {
           'Preparing ${entry.name}...',
           () => _vault.saveAs(entry),
         );
+      case 'restore':
+        await _restoreEntry(entry);
       case 'share':
         await _runAction(
           'Preparing ${entry.name}...',
@@ -356,6 +367,48 @@ class _VaultPageState extends State<VaultPage> {
     setState(() => _busyMessage = message);
     try {
       await action();
+    } catch (error) {
+      if (mounted) _showError(error);
+    } finally {
+      if (mounted) setState(() => _busyMessage = null);
+    }
+  }
+
+  Future<void> _restoreEntry(VaultEntry entry) async {
+    if (_busy) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: Theme.of(ctx).scaffoldBackgroundColor,
+        title: const Text('Restore Original File?'),
+        content: Text(
+          'The encrypted .cvlt file will be decrypted and put back as '
+          '"${entry.name}" in its original folder. The encrypted container '
+          'is then removed from the vault, so the file becomes readable by '
+          'anyone with access to that folder.',
+          style: const TextStyle(fontSize: AppSizes.subtitle, height: 1.4),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Restore'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    setState(() => _busyMessage = 'Restoring ${entry.name}...');
+    try {
+      await _vault.restore(entry);
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Restored ${entry.name}')));
     } catch (error) {
       if (mounted) _showError(error);
     } finally {

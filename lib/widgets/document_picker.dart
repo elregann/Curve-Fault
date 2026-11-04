@@ -59,10 +59,7 @@ Future<List<NativeDocument>?> pickDocumentsFromFolder(
                     child: Text(
                       '${folder.name} · ${files.length} '
                       'file${files.length == 1 ? '' : 's'}',
-                      style: TextStyle(
-                        color: secondaryColor,
-                        fontSize: 13,
-                      ),
+                      style: TextStyle(color: secondaryColor, fontSize: 13),
                     ),
                   ),
                   const Divider(height: 1),
@@ -85,6 +82,7 @@ Future<List<NativeDocument>?> pickDocumentsFromFolder(
                           },
                           controlAffinity: ListTileControlAffinity.leading,
                           activeColor: primaryColor,
+                          checkColor: isDark ? Colors.black : Colors.white,
                           title: Text(
                             document.name,
                             maxLines: 1,
@@ -128,13 +126,13 @@ Future<List<NativeDocument>?> pickDocumentsFromFolder(
                           onPressed: selected.isEmpty
                               ? null
                               : () => Navigator.of(ctx).pop(
-                                    files
-                                        .where(
-                                          (document) =>
-                                              selected.contains(document.uri),
-                                        )
-                                        .toList(growable: false),
-                                  ),
+                                  files
+                                      .where(
+                                        (document) =>
+                                            selected.contains(document.uri),
+                                      )
+                                      .toList(growable: false),
+                                ),
                           child: Text(
                             selected.isEmpty
                                 ? 'Select Files'

@@ -13,10 +13,7 @@ import 'vault_crypto.dart';
 
 /// Result of a bulk lock operation.
 class VaultLockSummary {
-  const VaultLockSummary({
-    required this.locked,
-    required this.failures,
-  });
+  const VaultLockSummary({required this.locked, required this.failures});
 
   final int locked;
   final List<String> failures;
@@ -184,9 +181,7 @@ class VaultService extends ChangeNotifier {
   ///
   /// A shared container can be opened with either the local vault key or the
   /// Curve256189 identity key, so recipients do not need the sender's seed.
-  Future<VaultLockSummary> importFiles(
-    List<NativeDocument> documents,
-  ) async {
+  Future<VaultLockSummary> importFiles(List<NativeDocument> documents) async {
     _requireUnlocked();
     _beginBatch(1);
     _lastFailures.clear();
@@ -227,8 +222,9 @@ class VaultService extends ChangeNotifier {
           privateKey: _privateKey,
         );
         final id = (info.metadata['id'] as String?)?.trim();
-        final resolvedId =
-            (id == null || id.isEmpty) ? _fallbackId(doc.uri) : id;
+        final resolvedId = (id == null || id.isEmpty)
+            ? _fallbackId(doc.uri)
+            : id;
         if (_entries.any((entry) => entry.id == resolvedId)) {
           _completed++;
           notifyListeners();
@@ -237,14 +233,15 @@ class VaultService extends ChangeNotifier {
         final entry = VaultEntry(
           id: resolvedId,
           uri: doc.uri,
-          name: info.metadata['name'] as String? ??
+          name:
+              info.metadata['name'] as String? ??
               _stripContainerSuffix(doc.name),
-          mime: info.metadata['mime'] as String? ??
-              'application/octet-stream',
+          mime: info.metadata['mime'] as String? ?? 'application/octet-stream',
           size: info.plaintextLength,
-          relativePath: info.metadata['relativePath'] as String? ??
-              doc.relativePath,
-          addedAt: (info.metadata['addedAt'] as num?)?.toInt() ??
+          relativePath:
+              info.metadata['relativePath'] as String? ?? doc.relativePath,
+          addedAt:
+              (info.metadata['addedAt'] as num?)?.toInt() ??
               DateTime.now().millisecondsSinceEpoch,
         );
         _entries.add(entry);
@@ -272,9 +269,7 @@ class VaultService extends ChangeNotifier {
     final work = await _workDir();
     final id = DateTime.now().microsecondsSinceEpoch;
     final container = File('${work.path}/${entry.id}_$id.cvlt');
-    final output = File(
-      '${work.path}/${_safeFileName(entry.name)}',
-    );
+    final output = File('${work.path}/${_safeFileName(entry.name)}');
     try {
       await NativeStorage.copyDocumentToFile(entry.uri, container.path);
       await VaultCrypto.decryptFile(
@@ -304,6 +299,40 @@ class VaultService extends ChangeNotifier {
       return result != null;
     } finally {
       _safeDelete(file);
+    }
+  }
+
+  /// Restores [entry] to its original file name and location.
+  ///
+  /// The container is decrypted to the private cache first, then written over
+  /// the container document and renamed back to the original name. The index
+  /// entry is only removed after the plaintext is safely on disk.
+  Future<void> restore(VaultEntry entry) async {
+    _requireUnlocked();
+    final work = await _workDir();
+    final stamp = DateTime.now().microsecondsSinceEpoch;
+    final container = File('${work.path}/${entry.id}_$stamp.cvlt');
+    final plaintext = File('${work.path}/restore_$stamp.plain');
+    try {
+      await NativeStorage.copyDocumentToFile(entry.uri, container.path);
+      await VaultCrypto.decryptFile(
+        containerPath: container.path,
+        outputPath: plaintext.path,
+        vaultKey: _vaultKey!,
+        privateKey: _privateKey,
+      );
+      await NativeStorage.restoreDocument(
+        uri: entry.uri,
+        plaintextPath: plaintext.path,
+        backupPath: container.path,
+        displayName: entry.name,
+      );
+      _entries.removeWhere((candidate) => candidate.id == entry.id);
+      await _saveIndex();
+      notifyListeners();
+    } finally {
+      _safeDelete(container);
+      _safeDelete(plaintext);
     }
   }
 
@@ -534,14 +563,19 @@ class VaultService extends ChangeNotifier {
       }
     }
     final nonce = Uint8List.fromList(bytes.sublist(4, 16));
-    final length = ByteData.sublistView(bytes, 16, 20)
-        .getUint32(0, Endian.little);
+    final length = ByteData.sublistView(
+      bytes,
+      16,
+      20,
+    ).getUint32(0, Endian.little);
     final cipherStart = 20;
     final cipherEnd = cipherStart + length;
     if (cipherEnd + _tagLength > bytes.length) {
       throw const FormatException('Vault index is truncated');
     }
-    final ciphertext = Uint8List.fromList(bytes.sublist(cipherStart, cipherEnd));
+    final ciphertext = Uint8List.fromList(
+      bytes.sublist(cipherStart, cipherEnd),
+    );
     final tag = Uint8List.fromList(
       bytes.sublist(cipherEnd, cipherEnd + _tagLength),
     );
@@ -635,9 +669,9 @@ class VaultService extends ChangeNotifier {
   }
 
   static String _newEntryId() {
-    return VaultCrypto.randomBytes(12)
-        .map((b) => b.toRadixString(16).padLeft(2, '0'))
-        .join();
+    return VaultCrypto.randomBytes(
+      12,
+    ).map((b) => b.toRadixString(16).padLeft(2, '0')).join();
   }
 
   static String _safeFileName(String name) {
