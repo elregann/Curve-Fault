@@ -3,7 +3,10 @@ import 'pages/vault_page.dart';
 import 'pages/encrypt_page.dart';
 import 'pages/identity_page.dart';
 import 'pages/setup_page.dart';
+import 'services/app_lock.dart';
 import 'services/seed_service.dart';
+import 'services/session_service.dart';
+import 'services/vault_service.dart';
 import 'theme/app_sizes.dart';
 import 'theme/theme_controller.dart';
 import 'pages/unlock_page.dart';
@@ -116,8 +119,41 @@ class MainShell extends StatefulWidget {
   State<MainShell> createState() => _MainShellState();
 }
 
-class _MainShellState extends State<MainShell> {
+class _MainShellState extends State<MainShell> with WidgetsBindingObserver {
   int _currentIndex = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused) {
+      AppLock.markPaused();
+    } else if (state == AppLifecycleState.resumed) {
+      if (AppLock.takeExpired() && !VaultService.instance.isBusy) {
+        _lockSession();
+      }
+    }
+  }
+
+  void _lockSession() {
+    VaultService.instance.lockSession();
+    SessionService.clearSession();
+    if (!mounted) return;
+    Navigator.of(context, rootNavigator: true).pushAndRemoveUntil(
+      MaterialPageRoute(builder: (_) => const UnlockPage()),
+      (route) => false,
+    );
+  }
 
   final _pages = const [
     VaultPage(),

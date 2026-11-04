@@ -11,6 +11,7 @@ import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.util.Base64
 import android.util.Log
+import android.view.WindowManager
 import android.webkit.MimeTypeMap
 import androidx.core.content.FileProvider
 import androidx.documentfile.provider.DocumentFile
@@ -32,6 +33,7 @@ class MainActivity : FlutterFragmentActivity() {
     companion object {
         private const val CHANNEL = "curve_fault/storage"
         private const val TAG_LENGTH = 16
+        private const val RECOVERY_MARKER = "[recovery-needed]"
         private const val REQUEST_PICK_FILES = 1201
         private const val REQUEST_PICK_FOLDER = 1202
         private const val REQUEST_SAVE_AS = 1203
@@ -180,6 +182,12 @@ class MainActivity : FlutterFragmentActivity() {
                             true
                         }
                     }
+                    "statDocument" -> {
+                        val uri = call.argument<String>("uri")
+                        if (uri == null) result.error("bad_args", "Missing uri", null)
+                        else runBackground(result) { statDocument(Uri.parse(uri)) }
+                    }
+                    "freeSpace" -> runBackground(result) { filesDir.usableSpace }
                     "saveAs" -> launchSaveAs(call, result)
                     "shareFile" -> {
                         val path = call.argument<String>("sourcePath")
@@ -276,6 +284,19 @@ class MainActivity : FlutterFragmentActivity() {
                     else -> result.notImplemented()
                 }
             }
+    }
+
+    override fun onPause() {
+        window.setFlags(
+            WindowManager.LayoutParams.FLAG_SECURE,
+            WindowManager.LayoutParams.FLAG_SECURE,
+        )
+        super.onPause()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
     }
 
     override fun onDestroy() {
@@ -467,11 +488,106 @@ class MainActivity : FlutterFragmentActivity() {
     }
 
     private fun listDocuments(treeUri: Uri, recursive: Boolean): List<Map<String, Any?>> {
+        val rootDocId = try {
+            if (DocumentsContract.isDocumentUri(this, treeUri)) {
+                DocumentsContract.getDocumentId(treeUri)
+            } else {
+                DocumentsContract.getTreeDocumentId(treeUri)
+            }
+        } catch (_: Exception) {
+            null
+        }
+        if (rootDocId != null) {
+            try {
+                val fast = mutableListOf<Map<String, Any?>>()
+                walkFast(treeUri, rootDocId, "", recursive, fast)
+                return fast
+            } catch (error: Exception) {
+                Log.w("CurveFault", "fast listing failed, using fallback", error)
+            }
+        }
         val root = DocumentFile.fromTreeUri(this, treeUri)
             ?: throw IOException("The selected folder is not accessible")
         val results = mutableListOf<Map<String, Any?>>()
         walk(root, "", recursive, results)
         return results
+    }
+
+    private fun walkFast(
+        treeUri: Uri,
+        parentDocId: String,
+        path: String,
+        recursive: Boolean,
+        results: MutableList<Map<String, Any?>>,
+    ) {
+        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, parentDocId)
+        val projection = arrayOf(
+            DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+            DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+            DocumentsContract.Document.COLUMN_MIME_TYPE,
+            DocumentsContract.Document.COLUMN_SIZE,
+            DocumentsContract.Document.COLUMN_LAST_MODIFIED,
+            DocumentsContract.Document.COLUMN_FLAGS,
+        )
+        val folders = mutableListOf<Pair<String, String>>()
+        val cursor = contentResolver.query(childrenUri, projection, null, null, null)
+            ?: throw IOException("The selected folder is not accessible")
+        cursor.use { rows ->
+            while (rows.moveToNext()) {
+                val docId = rows.getString(0) ?: continue
+                val name = rows.getString(1) ?: continue
+                val mime = rows.getString(2) ?: guessMime(name)
+                val isDirectory = mime == DocumentsContract.Document.MIME_TYPE_DIR
+                val size = if (!isDirectory && !rows.isNull(3)) rows.getLong(3) else 0L
+                val modified = if (!rows.isNull(4)) rows.getLong(4) else 0L
+                val flags = if (!rows.isNull(5)) rows.getLong(5) else 0L
+                val childPath = if (path.isEmpty()) name else "$path/$name"
+                val childUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
+                results.add(
+                    mapOf(
+                        "uri" to childUri.toString(),
+                        "name" to name,
+                        "mime" to mime,
+                        "size" to size,
+                        "relativePath" to childPath,
+                        "parentUri" to "",
+                        "lastModified" to modified,
+                        "isDirectory" to isDirectory,
+                        "canWrite" to ((flags and DocumentsContract.Document.FLAG_SUPPORTS_WRITE.toLong()) != 0L),
+                    ),
+                )
+                if (recursive && isDirectory) {
+                    folders.add(Pair(docId, childPath))
+                }
+            }
+        }
+        for ((docId, childPath) in folders) {
+            walkFast(treeUri, docId, childPath, recursive, results)
+        }
+    }
+
+    private fun statDocument(uri: Uri): Map<String, Any?> {
+        var exists = false
+        var name = ""
+        var size = 0L
+        try {
+            contentResolver.query(
+                uri,
+                arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE),
+                null,
+                null,
+                null,
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    exists = true
+                    name = cursor.getString(0) ?: ""
+                    size = if (!cursor.isNull(1)) cursor.getLong(1) else 0L
+                }
+            }
+        } catch (_: Exception) {
+            exists = false
+        }
+        return mapOf("exists" to exists, "name" to name, "size" to size)
     }
 
     private fun walk(
@@ -553,13 +669,15 @@ class MainActivity : FlutterFragmentActivity() {
             // Write the container while the original URI grant is still valid.
             val output = contentResolver.openOutputStream(uri, "wt")
                 ?: throw IOException("Could not open the locked file for writing")
+            // The stream truncates the original, so a failure from here on
+            // must restore the backup even if the copy did not finish.
+            wroteContainer = true
             output.use { target ->
                 File(containerPath).inputStream().use { source ->
                     source.copyTo(target, 64 * 1024)
                 }
                 target.flush()
             }
-            wroteContainer = true
 
             // Rename last so no provider access is needed on the new document
             // while the old URI is still the one covered by our grant.
@@ -605,6 +723,7 @@ class MainActivity : FlutterFragmentActivity() {
         } catch (error: Throwable) {
             // The plaintext backup is still in app-private storage. Try to put
             // the original bytes and name back before surfacing the failure.
+            var rollbackFailed = false
             if (wroteContainer) {
                 try {
                     contentResolver.openOutputStream(uri, "wt")?.use { target ->
@@ -614,7 +733,7 @@ class MainActivity : FlutterFragmentActivity() {
                         target.flush()
                     }
                 } catch (_: Exception) {
-                    // Best effort only.
+                    rollbackFailed = true
                 }
             }
             if (renamedUri != null) {
@@ -625,11 +744,17 @@ class MainActivity : FlutterFragmentActivity() {
                         originalName,
                     )
                 } catch (_: Exception) {
-                    // Best effort only.
+                    rollbackFailed = true
                 }
             }
             if (oldPath != null) {
                 refreshMedia(oldPath, oldPath)
+            }
+            if (rollbackFailed) {
+                throw IOException(
+                    "${error.message ?: "Could not lock the file"} $RECOVERY_MARKER",
+                    error,
+                )
             }
             throw error
         }
@@ -651,13 +776,13 @@ class MainActivity : FlutterFragmentActivity() {
             // Overwrite the container with the decrypted bytes first.
             val output = contentResolver.openOutputStream(uri, "wt")
                 ?: throw IOException("Could not open the encrypted file for writing")
+            wrotePlaintext = true
             output.use { target ->
                 File(plaintextPath).inputStream().use { source ->
                     source.copyTo(target, 64 * 1024)
                 }
                 target.flush()
             }
-            wrotePlaintext = true
 
             // Rename last so the plaintext is only visible under its real name
             // once the write has fully succeeded.

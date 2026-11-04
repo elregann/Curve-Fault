@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
+import 'app_lock.dart';
 import 'vault_crypto.dart';
 
 /// A file or directory selected through Android's Storage Access Framework.
@@ -59,6 +60,24 @@ class NativeDocument {
   }
 }
 
+/// Whether any segment of [relativePath] is a hidden file or folder.
+bool isHiddenPath(String relativePath) {
+  return relativePath.split('/').any((segment) => segment.startsWith('.'));
+}
+
+/// Existence, name and size of a single document.
+class DocumentStat {
+  const DocumentStat({
+    required this.exists,
+    required this.name,
+    required this.size,
+  });
+
+  final bool exists;
+  final String name;
+  final int size;
+}
+
 /// Result of replacing a plaintext document with its encrypted container.
 class LockedDocument {
   const LockedDocument({
@@ -86,6 +105,9 @@ class NativeStorage {
 
   static const MethodChannel _channel = MethodChannel('curve_fault/storage');
 
+  /// Appended by the native side when a failed lock could not be rolled back.
+  static const String recoveryMarker = '[recovery-needed]';
+
   /// Native storage operations are only implemented for Android.
   static bool get isSupported {
     if (kIsWeb) return false;
@@ -101,7 +123,9 @@ class NativeStorage {
   /// Opens the system file picker and returns every picked document.
   static Future<List<NativeDocument>> pickFiles() async {
     _requireSupport();
-    final result = await _channel.invokeMethod<List<dynamic>>('pickFiles');
+    final result = await AppLock.guardExternal(
+      () => _channel.invokeMethod<List<dynamic>>('pickFiles'),
+    );
     if (result == null) return const [];
     return result
         .whereType<Map>()
@@ -113,8 +137,8 @@ class NativeStorage {
   /// Opens the system folder picker. Returns `null` when cancelled.
   static Future<NativeDocument?> pickFolder() async {
     _requireSupport();
-    final result = await _channel.invokeMethod<Map<dynamic, dynamic>>(
-      'pickFolder',
+    final result = await AppLock.guardExternal(
+      () => _channel.invokeMethod<Map<dynamic, dynamic>>('pickFolder'),
     );
     return result == null ? null : NativeDocument.fromMap(result);
   }
@@ -147,6 +171,34 @@ class NativeStorage {
       throw StateError('Document is no longer accessible');
     }
     return NativeDocument.fromMap(result);
+  }
+
+  /// Checks whether [uri] still resolves and reports its current name and size.
+  static Future<DocumentStat> statDocument(String uri) async {
+    _requireSupport();
+    final result = await _channel.invokeMethod<Map<dynamic, dynamic>>(
+      'statDocument',
+      {'uri': uri},
+    );
+    if (result == null) {
+      return const DocumentStat(exists: false, name: '', size: 0);
+    }
+    return DocumentStat(
+      exists: result['exists'] as bool? ?? false,
+      name: result['name'] as String? ?? '',
+      size: (result['size'] as num?)?.toInt() ?? 0,
+    );
+  }
+
+  /// Free bytes in app storage, or `null` when it cannot be determined.
+  static Future<int?> freeSpace() async {
+    if (!isSupported) return null;
+    try {
+      final value = await _channel.invokeMethod<num>('freeSpace');
+      return value?.toInt();
+    } catch (_) {
+      return null;
+    }
   }
 
   /// Copies a content URI to a normal file path.
@@ -229,11 +281,13 @@ class NativeStorage {
     required String mime,
   }) async {
     _requireSupport();
-    return _channel.invokeMethod<String>('saveAs', {
-      'sourcePath': sourcePath,
-      'displayName': displayName,
-      'mime': mime,
-    });
+    return AppLock.guardExternal(
+      () => _channel.invokeMethod<String>('saveAs', {
+        'sourcePath': sourcePath,
+        'displayName': displayName,
+        'mime': mime,
+      }),
+    );
   }
 
   /// Shares a local cache file using a FileProvider content URI.

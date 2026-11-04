@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart' show PlatformException;
 import 'package:path_provider/path_provider.dart';
 
 import '../crypto/curve256189.dart';
@@ -19,6 +20,66 @@ class VaultLockSummary {
   final List<String> failures;
 
   bool get hasFailures => failures.isNotEmpty;
+}
+
+/// Journal record for a lock that started but is not yet in the index.
+class PendingLock {
+  const PendingLock({
+    required this.id,
+    required this.uri,
+    required this.name,
+    required this.mime,
+    required this.relativePath,
+    required this.addedAt,
+    required this.size,
+  });
+
+  final String id;
+  final String uri;
+  final String name;
+  final String mime;
+  final String relativePath;
+  final int addedAt;
+  final int size;
+
+  Map<String, dynamic> toJson() {
+    return {
+      'id': id,
+      'uri': uri,
+      'name': name,
+      'mime': mime,
+      'relativePath': relativePath,
+      'addedAt': addedAt,
+      'size': size,
+    };
+  }
+
+  factory PendingLock.fromJson(Map<String, dynamic> json) {
+    return PendingLock(
+      id: json['id'] as String,
+      uri: json['uri'] as String,
+      name: json['name'] as String? ?? 'Unknown',
+      mime: json['mime'] as String? ?? 'application/octet-stream',
+      relativePath: json['relativePath'] as String? ?? '',
+      addedAt: (json['addedAt'] as num?)?.toInt() ?? 0,
+      size: (json['size'] as num?)?.toInt() ?? 0,
+    );
+  }
+}
+
+/// What to do with an interrupted lock when the vault is unlocked again.
+enum PendingAction { drop, adopt, retry }
+
+PendingAction decidePendingAction({
+  required PendingLock record,
+  required bool documentExists,
+  required String documentName,
+  required bool containerAvailable,
+}) {
+  if (!documentExists) return PendingAction.drop;
+  if (documentName == '${record.id}.cvlt') return PendingAction.adopt;
+  if (!containerAvailable) return PendingAction.drop;
+  return PendingAction.retry;
 }
 
 /// Owns the encrypted vault catalogue and coordinates in-place locking.
@@ -45,6 +106,8 @@ class VaultService extends ChangeNotifier {
   String? _indexWarning;
   final List<VaultEntry> _entries = <VaultEntry>[];
   final List<String> _lastFailures = <String>[];
+  final List<PendingLock> _pending = <PendingLock>[];
+  String? _recoveryNotice;
   Future<Directory>? _workDirFuture;
 
   List<VaultEntry> get entries => List<VaultEntry>.unmodifiable(_entries);
@@ -55,27 +118,54 @@ class VaultService extends ChangeNotifier {
   int get total => _total;
   String? get currentLabel => _currentLabel;
   String? get indexWarning => _indexWarning;
+  String? get recoveryNotice => _recoveryNotice;
   List<String> get lastFailures => List<String>.unmodifiable(_lastFailures);
+
+  @visibleForTesting
+  void debugSetEntries(List<VaultEntry> entries) {
+    _entries
+      ..clear()
+      ..addAll(entries);
+    notifyListeners();
+  }
 
   /// Derives the vault key and loads the encrypted index after unlock.
   Future<void> unlock(Uint8List seed) async {
     _vaultKey = VaultCrypto.deriveVaultKey(seed);
     VaultCrypto.defaultCipher = NativeContentCipher.instance;
     _unlocked = true;
+    _recoveryNotice = null;
     await _cleanWorkDir();
     await _loadIndex();
+    await _resolvePending();
     notifyListeners();
   }
 
   /// Clears all in-memory vault state. Called by the wipe flow.
   Future<void> lockAndClear() async {
     _entries.clear();
+    _pending.clear();
     _vaultKey?.fillRange(0, _vaultKey!.length, 0);
     _vaultKey = null;
     _unlocked = false;
     _indexWarning = null;
+    _recoveryNotice = null;
     _busy = false;
     await _cleanWorkDir();
+    _safeDelete(Directory('${(await _supportDir()).path}/pending'));
+    notifyListeners();
+  }
+
+  /// Drops the keys and in-memory catalogue without touching files on disk.
+  /// Used by the auto lock when the app returns from the background.
+  void lockSession() {
+    _entries.clear();
+    _pending.clear();
+    _vaultKey?.fillRange(0, _vaultKey!.length, 0);
+    _vaultKey = null;
+    _unlocked = false;
+    _indexWarning = null;
+    _recoveryNotice = null;
     notifyListeners();
   }
 
@@ -125,7 +215,7 @@ class VaultService extends ChangeNotifier {
       final files = all
           .where((doc) => !doc.isDirectory)
           .where((doc) => !_isVaultContainer(doc.name))
-          .where((doc) => !doc.name.startsWith('.'))
+          .where((doc) => !isHiddenPath(doc.relativePath))
           .toList(growable: false);
       if (files.isEmpty) {
         return const VaultLockSummary(locked: 0, failures: []);
@@ -155,6 +245,17 @@ class VaultService extends ChangeNotifier {
     } finally {
       _endBatch();
     }
+  }
+
+  /// Lists the files a folder lock would touch, skipping containers and
+  /// anything hidden.
+  Future<List<NativeDocument>> scanFolder(NativeDocument folder) async {
+    final all = await NativeStorage.listDocuments(folder.uri);
+    return all
+        .where((doc) => !doc.isDirectory)
+        .where((doc) => !_isVaultContainer(doc.name))
+        .where((doc) => !isHiddenPath(doc.relativePath))
+        .toList(growable: false);
   }
 
   /// Rebuilds index entries from the `.cvlt` files in [folder].
@@ -226,8 +327,6 @@ class VaultService extends ChangeNotifier {
             ? _fallbackId(doc.uri)
             : id;
         if (_entries.any((entry) => entry.id == resolvedId)) {
-          _completed++;
-          notifyListeners();
           continue;
         }
         final entry = VaultEntry(
@@ -336,6 +435,34 @@ class VaultService extends ChangeNotifier {
     }
   }
 
+  /// Restores several entries one after another with batch progress.
+  Future<VaultLockSummary> restoreEntries(List<VaultEntry> entries) async {
+    _requireUnlocked();
+    _beginBatch(entries.length);
+    _lastFailures.clear();
+    var restored = 0;
+    try {
+      for (final entry in entries) {
+        _currentLabel = entry.name;
+        notifyListeners();
+        try {
+          await restore(entry);
+          restored++;
+        } catch (error) {
+          _lastFailures.add('${entry.name}: ${_messageFor(error)}');
+        }
+        _completed++;
+        notifyListeners();
+      }
+    } finally {
+      _endBatch();
+    }
+    return VaultLockSummary(
+      locked: restored,
+      failures: List<String>.unmodifiable(_lastFailures),
+    );
+  }
+
   /// Shares a decrypted copy using the system share sheet.
   Future<void> share(VaultEntry entry) async {
     final file = await decryptToTemp(entry);
@@ -432,11 +559,16 @@ class VaultService extends ChangeNotifier {
 
   Future<VaultEntry> _lockOne(NativeDocument doc) async {
     final work = await _workDir();
+    final pendingDir = await _pendingDir();
     final id = _newEntryId();
     final plain = File('${work.path}/$id.plain');
-    final container = File('${work.path}/$id.cvlt');
+    final container = File('${pendingDir.path}/$id.cvlt');
+    var journaled = false;
+    var keepPending = false;
     try {
+      await _ensureFreeSpace(doc.size);
       await NativeStorage.copyDocumentToFile(doc.uri, plain.path);
+      final addedAt = DateTime.now().millisecondsSinceEpoch;
       final info = await VaultCrypto.encryptFile(
         inputPath: plain.path,
         outputPath: container.path,
@@ -446,7 +578,7 @@ class VaultService extends ChangeNotifier {
           'name': doc.name,
           'mime': doc.mime,
           'relativePath': doc.relativePath,
-          'addedAt': DateTime.now().millisecondsSinceEpoch,
+          'addedAt': addedAt,
         },
       );
       await VaultCrypto.verifyFile(
@@ -454,12 +586,32 @@ class VaultService extends ChangeNotifier {
         vaultKey: _vaultKey!,
       );
 
-      final locked = await NativeStorage.replaceDocument(
-        uri: doc.uri,
-        containerPath: container.path,
-        backupPath: plain.path,
-        displayName: '$id.cvlt',
+      _pending.add(
+        PendingLock(
+          id: id,
+          uri: doc.uri,
+          name: doc.name,
+          mime: doc.mime,
+          relativePath: doc.relativePath,
+          addedAt: addedAt,
+          size: info.plaintextLength,
+        ),
       );
+      journaled = true;
+      await _saveIndex();
+
+      final LockedDocument locked;
+      try {
+        locked = await NativeStorage.replaceDocument(
+          uri: doc.uri,
+          containerPath: container.path,
+          backupPath: plain.path,
+          displayName: '$id.cvlt',
+        );
+      } catch (error) {
+        keepPending = error.toString().contains(NativeStorage.recoveryMarker);
+        rethrow;
+      }
 
       final entry = VaultEntry(
         id: id,
@@ -468,19 +620,119 @@ class VaultService extends ChangeNotifier {
         mime: doc.mime,
         size: info.plaintextLength,
         relativePath: doc.relativePath,
-        addedAt: DateTime.now().millisecondsSinceEpoch,
+        addedAt: addedAt,
       );
       _entries.insert(0, entry);
+      _pending.removeWhere((candidate) => candidate.id == id);
+      journaled = false;
       await _saveIndex();
       return entry;
     } finally {
       _safeDelete(plain);
-      _safeDelete(container);
+      if (!keepPending) {
+        _safeDelete(container);
+        if (journaled) {
+          _pending.removeWhere((candidate) => candidate.id == id);
+          await _saveIndex();
+        }
+      }
+    }
+  }
+
+  Future<Directory> _pendingDir() async {
+    final dir = Directory('${(await _supportDir()).path}/pending');
+    if (!dir.existsSync()) {
+      dir.createSync(recursive: true);
+    }
+    return dir;
+  }
+
+  Future<void> _ensureFreeSpace(int fileSize) async {
+    if (fileSize <= 0) return;
+    final free = await NativeStorage.freeSpace();
+    if (free == null) return;
+    final needed = fileSize * 2 + 8 * 1024 * 1024;
+    if (free < needed) {
+      throw VaultCryptoException('Not enough free storage to lock this file');
+    }
+  }
+
+  void _adoptPending(PendingLock record, String uri) {
+    if (_entries.any((entry) => entry.id == record.id)) return;
+    _entries.insert(
+      0,
+      VaultEntry(
+        id: record.id,
+        uri: uri,
+        name: record.name,
+        mime: record.mime,
+        size: record.size,
+        relativePath: record.relativePath,
+        addedAt: record.addedAt,
+      ),
+    );
+  }
+
+  /// Finishes or discards locks that were interrupted by a crash or kill.
+  Future<void> _resolvePending() async {
+    if (_pending.isEmpty) return;
+    final pendingDir = await _pendingDir();
+    var lost = 0;
+    var failed = 0;
+    for (final record in List<PendingLock>.of(_pending)) {
+      final container = File('${pendingDir.path}/${record.id}.cvlt');
+      try {
+        final stat = await NativeStorage.statDocument(record.uri);
+        final action = decidePendingAction(
+          record: record,
+          documentExists: stat.exists,
+          documentName: stat.name,
+          containerAvailable: container.existsSync(),
+        );
+        switch (action) {
+          case PendingAction.drop:
+            if (!stat.exists) lost++;
+          case PendingAction.adopt:
+            _adoptPending(record, record.uri);
+          case PendingAction.retry:
+            {
+              final locked = await NativeStorage.replaceDocument(
+                uri: record.uri,
+                containerPath: container.path,
+                backupPath: container.path,
+                displayName: '${record.id}.cvlt',
+              );
+              _adoptPending(record, locked.uri);
+            }
+        }
+        _pending.removeWhere((candidate) => candidate.id == record.id);
+        _safeDelete(container);
+      } catch (_) {
+        failed++;
+      }
+    }
+    await _saveIndex();
+    final notes = <String>[];
+    if (lost > 0) {
+      notes.add(
+        'A lock was interrupted. Run Recover Folder on the original folder '
+        'to find locked files that were not indexed.',
+      );
+    }
+    if (failed > 0) {
+      notes.add(
+        'Some interrupted locks could not be finished and will be retried '
+        'on the next unlock.',
+      );
+    }
+    if (notes.isNotEmpty) {
+      _recoveryNotice = notes.join(' ');
     }
   }
 
   Future<void> _loadIndex() async {
     _entries.clear();
+    _pending.clear();
     _indexWarning = null;
     final key = _vaultKey;
     if (key == null) return;
@@ -494,6 +746,17 @@ class VaultService extends ChangeNotifier {
       final decoded = jsonDecode(utf8.decode(plaintext));
       if (decoded is! Map) {
         throw const FormatException('Invalid vault index');
+      }
+      final rawPending = decoded['pending'];
+      if (rawPending is List) {
+        for (final raw in rawPending) {
+          if (raw is! Map) continue;
+          try {
+            _pending.add(PendingLock.fromJson(Map<String, dynamic>.from(raw)));
+          } catch (_) {
+            // A malformed journal record is skipped.
+          }
+        }
       }
       final rawEntries = decoded['entries'];
       if (rawEntries is List) {
@@ -520,6 +783,7 @@ class VaultService extends ChangeNotifier {
       final payload = <String, dynamic>{
         'version': _indexVersion,
         'entries': _entries.map((entry) => entry.toJson()).toList(),
+        'pending': _pending.map((record) => record.toJson()).toList(),
       };
       final plaintext = Uint8List.fromList(utf8.encode(jsonEncode(payload)));
       temp.writeAsBytesSync(_encryptIndex(plaintext, key), flush: true);
@@ -685,6 +949,15 @@ class VaultService extends ChangeNotifier {
 
   static String _messageFor(Object error) {
     if (error is VaultCryptoException) return error.message;
+    if (error is PlatformException) {
+      final raw = error.message ?? error.code;
+      return raw
+          .replaceAll(
+            NativeStorage.recoveryMarker,
+            'It will be finished on the next unlock.',
+          )
+          .trim();
+    }
     final text = error.toString();
     return text.startsWith('Exception: ') ? text.substring(11) : text;
   }

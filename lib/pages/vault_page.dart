@@ -44,6 +44,19 @@ class _VaultPageState extends State<VaultPage> {
     setState(() => _selectedIds.clear());
   }
 
+  void _toggleSelectAll() {
+    final all = _vault.entries;
+    setState(() {
+      if (_selectedIds.length == all.length) {
+        _selectedIds.clear();
+      } else {
+        _selectedIds
+          ..clear()
+          ..addAll(all.map((entry) => entry.id));
+      }
+    });
+  }
+
   Future<void> _showActions(VaultEntry entry) async {
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final primaryColor = Theme.of(context).primaryColor;
@@ -420,6 +433,73 @@ class _VaultPageState extends State<VaultPage> {
     }
   }
 
+  Future<void> _restoreEntries(List<VaultEntry> entries) async {
+    if (entries.isEmpty || _busy) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: Theme.of(ctx).scaffoldBackgroundColor,
+        title: Text(
+          entries.length == 1
+              ? 'Restore Original File?'
+              : 'Restore ${entries.length} Files?',
+        ),
+        content: const Text(
+          'The selected files will be decrypted and put back under their '
+          'original names in their original folders. The encrypted '
+          'containers are then removed from the vault, so the files become '
+          'readable by anyone with access to those folders.',
+          style: TextStyle(fontSize: AppSizes.subtitle, height: 1.4),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Restore'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    try {
+      final summary = await _vault.restoreEntries(entries);
+      if (!mounted) return;
+      setState(() => _selectedIds.clear());
+      final parts = <String>[];
+      if (summary.locked > 0) {
+        parts.add(
+          'Restored ${summary.locked} file${summary.locked == 1 ? '' : 's'}',
+        );
+      }
+      if (summary.failures.isNotEmpty) {
+        parts.add('${summary.failures.length} failed');
+      }
+      if (parts.isEmpty) {
+        parts.add('Nothing was restored');
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(parts.join(' · ')),
+          action: summary.failures.isEmpty
+              ? null
+              : SnackBarAction(
+                  label: 'Details',
+                  onPressed: () => _showFailures(
+                    summary.failures,
+                    title: 'Could not restore every file',
+                  ),
+                ),
+        ),
+      );
+    } catch (error) {
+      if (mounted) _showError(error);
+    }
+  }
+
   Future<void> _deleteEntries(List<VaultEntry> entries) async {
     if (entries.isEmpty || _busy) return;
     final confirmed = await showDialog<bool>(
@@ -545,12 +625,15 @@ class _VaultPageState extends State<VaultPage> {
     ).showSnackBar(SnackBar(content: Text(message)));
   }
 
-  void _showFailures(List<String> failures) {
+  void _showFailures(
+    List<String> failures, {
+    String title = 'Could not delete every file',
+  }) {
     showDialog<void>(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: Theme.of(ctx).scaffoldBackgroundColor,
-        title: const Text('Could not delete every file'),
+        title: Text(title),
         content: SingleChildScrollView(
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -622,6 +705,18 @@ class _VaultPageState extends State<VaultPage> {
             ),
             actions: [
               if (_selecting) ...[
+                IconButton(
+                  icon: const Icon(Icons.select_all),
+                  tooltip: 'Select all',
+                  onPressed: busy ? null : _toggleSelectAll,
+                ),
+                IconButton(
+                  icon: const Icon(Icons.restore),
+                  tooltip: 'Restore selected',
+                  onPressed: busy || _selectedIds.isEmpty
+                      ? null
+                      : () => _restoreEntries(_selectedEntries),
+                ),
                 IconButton(
                   icon: const Icon(Icons.delete_outline),
                   color: Colors.redAccent,
@@ -713,6 +808,24 @@ class _VaultPageState extends State<VaultPage> {
                     ),
                   ),
                 ),
+              if (_vault.recoveryNotice != null)
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.fromLTRB(20, 12, 20, 12),
+                  decoration: BoxDecoration(
+                    border: Border(
+                      bottom: BorderSide(color: dividerColor, width: 0.5),
+                    ),
+                  ),
+                  child: Text(
+                    _vault.recoveryNotice!,
+                    style: const TextStyle(
+                      color: Colors.orangeAccent,
+                      fontSize: 12,
+                      height: 1.35,
+                    ),
+                  ),
+                ),
               Expanded(
                 child: entries.isEmpty
                     ? _EmptyState(
@@ -755,19 +868,19 @@ class _VaultPageState extends State<VaultPage> {
                               overflow: TextOverflow.ellipsis,
                             ),
                             subtitle: Text(
-                              '${_formatBytes(entry.size)} · ${_formatDate(entry.addedAt)}',
+                              _formatDate(entry.addedAt),
                               style: TextStyle(
                                 color: secondaryTextColor,
                                 fontSize: 13,
                               ),
                             ),
-                            trailing: _selecting
-                                ? null
-                                : Icon(
-                                    Icons.more_vert,
-                                    size: AppSizes.icon - 6,
-                                    color: secondaryTextColor,
-                                  ),
+                            trailing: Text(
+                              _formatBytes(entry.size),
+                              style: TextStyle(
+                                color: secondaryTextColor,
+                                fontSize: 13,
+                              ),
+                            ),
                             onTap: busy
                                 ? null
                                 : _selecting

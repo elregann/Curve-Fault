@@ -15,13 +15,16 @@ class EncryptPage extends StatefulWidget {
 
 class _EncryptPageState extends State<EncryptPage> {
   List<NativeDocument> _pickedFiles = const [];
+  List<NativeDocument> _folderFiles = const [];
   NativeDocument? _pickedFolder;
   String? _pickerError;
+  bool _scanning = false;
 
   VaultService get _vault => VaultService.instance;
 
   bool get _hasSelection =>
-      _pickedFiles.isNotEmpty || _pickedFolder != null;
+      _pickedFiles.isNotEmpty ||
+      (_pickedFolder != null && _folderFiles.isNotEmpty);
 
   Future<void> _pickFiles() async {
     if (_vault.isBusy) return;
@@ -42,6 +45,7 @@ class _EncryptPageState extends State<EncryptPage> {
       setState(() {
         _pickedFiles = files;
         _pickedFolder = null;
+        _folderFiles = const [];
         _pickerError = null;
       });
     } catch (error) {
@@ -51,32 +55,78 @@ class _EncryptPageState extends State<EncryptPage> {
   }
 
   Future<void> _pickFolder() async {
-    if (_vault.isBusy) return;
+    if (_vault.isBusy || _scanning) return;
     try {
       final folder = await NativeStorage.pickFolder();
       if (!mounted || folder == null) return;
       setState(() {
-        _pickedFolder = folder;
-        _pickedFiles = const [];
+        _scanning = true;
         _pickerError = null;
+      });
+      final files = await _vault.scanFolder(folder);
+      if (!mounted) return;
+      setState(() {
+        _scanning = false;
+        if (files.isEmpty) {
+          _pickerError = 'No lockable files were found in that folder';
+          return;
+        }
+        _pickedFolder = folder;
+        _folderFiles = files;
+        _pickedFiles = const [];
       });
     } catch (error) {
       if (!mounted) return;
-      setState(() => _pickerError = _messageFor(error));
+      setState(() {
+        _scanning = false;
+        _pickerError = _messageFor(error);
+      });
     }
+  }
+
+  Future<bool> _confirmFolderLock(
+    NativeDocument folder,
+    List<NativeDocument> files,
+  ) async {
+    final total = files.fold<int>(0, (sum, document) => sum + document.size);
+    final nested = files.any((document) => document.relativePath.contains('/'));
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: Theme.of(ctx).scaffoldBackgroundColor,
+        title: Text('Lock ${files.length} file${files.length == 1 ? '' : 's'}?'),
+        content: Text(
+          'Every file in "${folder.name}"${nested ? ' and its subfolders' : ''} '
+          'will be encrypted in place (${_formatBytes(total)}). '
+          'Hidden files are skipped.',
+          style: const TextStyle(fontSize: AppSizes.subtitle, height: 1.4),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Lock'),
+          ),
+        ],
+      ),
+    );
+    return confirmed == true;
   }
 
   Future<void> _lockSelection() async {
     if (_vault.isBusy || !_hasSelection) return;
     final folder = _pickedFolder;
-    final files = _pickedFiles;
+    final files = folder != null ? _folderFiles : _pickedFiles;
+    if (folder != null && !await _confirmFolderLock(folder, files)) return;
+    if (!mounted) return;
     setState(() => _pickerError = null);
 
     late final VaultLockSummary summary;
     try {
-      summary = folder != null
-          ? await _vault.lockFolder(folder)
-          : await _vault.lockDocuments(files);
+      summary = await _vault.lockDocuments(files);
     } catch (error) {
       if (mounted) {
         setState(() => _pickerError = _messageFor(error));
@@ -87,6 +137,7 @@ class _EncryptPageState extends State<EncryptPage> {
     if (!mounted) return;
     setState(() {
       _pickedFiles = const [];
+      _folderFiles = const [];
       _pickedFolder = null;
     });
 
@@ -167,7 +218,7 @@ class _EncryptPageState extends State<EncryptPage> {
       body: AnimatedBuilder(
         animation: _vault,
         builder: (context, _) {
-          final busy = _vault.isBusy;
+          final busy = _vault.isBusy || _scanning;
           final total = _vault.total;
           final progress = total > 0
               ? (_vault.completed / total).clamp(0.0, 1.0)
@@ -187,7 +238,9 @@ class _EncryptPageState extends State<EncryptPage> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        _vault.currentLabel == null
+                        _scanning
+                            ? 'Scanning folder...'
+                            : _vault.currentLabel == null
                             ? 'Working...'
                             : 'Locking ${_vault.currentLabel}',
                         style: TextStyle(
@@ -200,7 +253,7 @@ class _EncryptPageState extends State<EncryptPage> {
                       ),
                       const SizedBox(height: 10),
                       LinearProgressIndicator(
-                        value: progress,
+                        value: _scanning ? null : progress,
                         minHeight: 3,
                         backgroundColor:
                             isDark ? Colors.white12 : Colors.black12,
@@ -315,7 +368,9 @@ class _EncryptPageState extends State<EncryptPage> {
                     overflow: TextOverflow.ellipsis,
                   ),
                   subtitle: Text(
-                    _pickedFolder!.relativePath,
+                    '${_folderFiles.length} '
+                    'file${_folderFiles.length == 1 ? '' : 's'} · '
+                    '${_formatBytes(_folderFiles.fold<int>(0, (sum, document) => sum + document.size))}',
                     style: TextStyle(
                       color: secondaryTextColor,
                       fontSize: 13,
@@ -331,7 +386,10 @@ class _EncryptPageState extends State<EncryptPage> {
                     ),
                     onPressed: busy
                         ? null
-                        : () => setState(() => _pickedFolder = null),
+                        : () => setState(() {
+                            _pickedFolder = null;
+                            _folderFiles = const [];
+                          }),
                   ),
                 ),
               ],
