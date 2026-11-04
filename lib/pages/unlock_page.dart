@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../services/seed_service.dart';
 import '../services/session_service.dart';
+import '../services/vault_service.dart';
 import '../theme/app_sizes.dart';
 import '../main.dart';
 
@@ -44,6 +45,7 @@ class _UnlockPageState extends State<UnlockPage> {
 
       // Initialize runtime in-memory session with decrypted master seed
       SessionService.setSession(seed);
+      await VaultService.instance.unlock(seed);
 
       if (!mounted) return;
       Navigator.of(context).pushReplacement(

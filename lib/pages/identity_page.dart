@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:qr_flutter/qr_flutter.dart';
 import '../services/seed_service.dart';
 import '../services/session_service.dart';
+import '../services/vault_service.dart';
 import '../theme/app_sizes.dart';
 import '../theme/theme_controller.dart';
 import 'setup_page.dart';
@@ -38,49 +40,67 @@ class _IdentityPageState extends State<IdentityPage> {
     });
   }
 
-  void _showPublicKeyDialog() {
-    final keyHex = SessionService.publicKeyHex ?? 'Not available';
+  void _showQrCodeDialog() {
+    final keyHex = SessionService.publicKeyHex;
     final isDark = Theme.of(context).brightness == Brightness.dark;
+    final primaryColor = Theme.of(context).primaryColor;
 
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: Theme.of(context).scaffoldBackgroundColor,
         title: Text(
-          'Public Key',
+          'QR Code',
           style: TextStyle(
             fontSize: AppSizes.title - 4,
             fontWeight: FontWeight.w500,
-            color: Theme.of(context).primaryColor,
+            color: primaryColor,
           ),
         ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Container(
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                border: Border.all(color: Theme.of(context).dividerColor),
-              ),
-              child: SelectableText(
-                keyHex,
-                style: TextStyle(
-                  fontFamily: 'monospace',
-                  fontSize: 13,
-                  color: isDark ? Colors.white70 : Colors.black87,
+        content: keyHex == null || keyHex.isEmpty
+            ? Padding(
+                padding: const EdgeInsets.symmetric(vertical: 20),
+                child: Text(
+                  'Public key not available to display QR code.',
+                  style: TextStyle(
+                    color: isDark ? Colors.white54 : Colors.black54,
+                    fontSize: AppSizes.subtitle,
+                  ),
                 ),
+              )
+            : Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: isDark ? Colors.black : Colors.white,
+                      border: Border.all(color: Theme.of(context).dividerColor),
+                    ),
+                    child: QrImageView(
+                      data: keyHex,
+                      version: QrVersions.auto,
+                      size: 200.0,
+                      eyeStyle: QrEyeStyle(
+                        eyeShape: QrEyeShape.square,
+                        color: isDark ? Colors.white : Colors.black,
+                      ),
+                      dataModuleStyle: QrDataModuleStyle(
+                        dataModuleShape: QrDataModuleShape.square,
+                        color: isDark ? Colors.white : Colors.black,
+                      ),
+                      backgroundColor: isDark ? Colors.black : Colors.white,
+                    ),
+                  ),
+                ],
               ),
-            ),
-          ],
-        ),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(ctx).pop(),
             child: Text(
               'Close',
               style: TextStyle(
-                color: Theme.of(context).primaryColor,
+                color: primaryColor,
                 fontSize: AppSizes.subtitle,
               ),
             ),
@@ -431,7 +451,7 @@ class _IdentityPageState extends State<IdentityPage> {
           ),
         ),
         content: Text(
-          'This will permanently erase all master seeds, identity keys, and configurations from this device. This operation cannot be reversed.',
+          'This will permanently erase all master seeds, identity keys, the vault index, and configurations from this device. Every locked .cvlt file will become unreadable forever. This operation cannot be reversed.',
           style: TextStyle(
             color: Theme.of(context).brightness == Brightness.dark
                 ? Colors.white70
@@ -464,6 +484,7 @@ class _IdentityPageState extends State<IdentityPage> {
     );
 
     if (confirmed == true) {
+      await VaultService.instance.lockAndClear();
       await SeedService.wipe();
       SessionService.clearSession();
 
@@ -522,7 +543,7 @@ class _IdentityPageState extends State<IdentityPage> {
               'Show QR Code',
               style: TextStyle(fontSize: AppSizes.title, color: primaryColor),
             ),
-            onTap: _showPublicKeyDialog,
+            onTap: _showQrCodeDialog,
           ),
           ListTile(
             leading: Icon(

@@ -73,6 +73,35 @@ class SeedService {
     return seed;
   }
 
+  /// Restores an existing 32-byte master seed and protects it with [passphrase].
+  ///
+  /// Use this after reinstalling the app so previously locked `.cvlt` files can
+  /// be opened again.
+  static Future<Uint8List> restore({
+    required Uint8List seed,
+    required String passphrase,
+  }) async {
+    if (seed.length != 32) {
+      throw ArgumentError.value(seed.length, 'seed', 'Master seed must be 32 bytes');
+    }
+    final salt = _randomBytes(16);
+    final nonce = _randomBytes(12);
+    final key = await _deriveKey(passphrase, salt);
+    final result = AESGCM.encrypt(
+      key: key,
+      nonce: nonce,
+      plaintext: seed,
+    );
+
+    await _storage.write(key: _keySalt, value: base64Encode(salt));
+    await _storage.write(key: _keyNonce, value: base64Encode(nonce));
+    await _storage.write(key: _keySeed, value: base64Encode(result.ciphertext));
+    await _storage.write(key: _keyTag, value: base64Encode(result.tag));
+    await _storage.write(key: _keyHasSetup, value: 'true');
+
+    return Uint8List.fromList(seed);
+  }
+
   /// Decrypts and retrieves the master seed using the provided [passphrase].
   ///
   /// Returns `null` if the passphrase is incorrect or if the stored records are corrupted.
