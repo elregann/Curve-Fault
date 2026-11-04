@@ -26,7 +26,7 @@ class CurveVaultApp extends StatelessWidget {
         final isDark = ThemeController.instance.isDark;
 
         return MaterialApp(
-          title: 'CurveVault',
+          title: 'Curve Fault',
           debugShowCheckedModeBanner: false,
           themeMode: ThemeController.instance.themeMode,
 
