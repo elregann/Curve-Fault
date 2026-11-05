@@ -31,6 +31,25 @@ class NativeDocument {
   final bool isDirectory;
   final bool canWrite;
 
+  /// The same document seen through another uri, for example the tree form
+  /// that a folder grant covers.
+  NativeDocument withLocation({
+    required String uri,
+    required String relativePath,
+  }) {
+    return NativeDocument(
+      uri: uri,
+      name: name,
+      mime: mime,
+      size: size,
+      relativePath: relativePath,
+      parentUri: parentUri,
+      lastModified: lastModified,
+      isDirectory: isDirectory,
+      canWrite: canWrite,
+    );
+  }
+
   factory NativeDocument.fromMap(Map<dynamic, dynamic> map) {
     return NativeDocument(
       uri: map['uri'] as String,
@@ -76,6 +95,15 @@ class DocumentStat {
   final bool exists;
   final String name;
   final int size;
+}
+
+/// Storage document ids for a batch of picked uris, in the order asked.
+/// An id is `null` when the real location could not be found.
+class DocumentIds {
+  const DocumentIds({required this.sdk, required this.ids});
+
+  final int sdk;
+  final List<String?> ids;
 }
 
 /// Result of replacing a plaintext document with its encrypted container.
@@ -135,10 +163,15 @@ class NativeStorage {
   }
 
   /// Opens the system folder picker. Returns `null` when cancelled.
-  static Future<NativeDocument?> pickFolder() async {
+  ///
+  /// [initialDocId] opens the picker at that folder when the system allows it.
+  static Future<NativeDocument?> pickFolder({String? initialDocId}) async {
     _requireSupport();
     final result = await AppLock.guardExternal(
-      () => _channel.invokeMethod<Map<dynamic, dynamic>>('pickFolder'),
+      () => _channel.invokeMethod<Map<dynamic, dynamic>>(
+        'pickFolder',
+        initialDocId == null ? null : {'initialDocId': initialDocId},
+      ),
     );
     return result == null ? null : NativeDocument.fromMap(result);
   }
@@ -199,6 +232,27 @@ class NativeStorage {
     } catch (_) {
       return null;
     }
+  }
+
+  /// Folder grants this app still holds with write access.
+  static Future<List<String>> persistedTrees() async {
+    _requireSupport();
+    final result = await _channel.invokeMethod<List<dynamic>>('persistedTrees');
+    return (result ?? const []).whereType<String>().toList(growable: false);
+  }
+
+  /// Finds the storage document id behind each picked uri.
+  static Future<DocumentIds> resolveDocumentIds(List<String> uris) async {
+    _requireSupport();
+    final result = await _channel.invokeMethod<Map<dynamic, dynamic>>(
+      'resolveDocumentIds',
+      {'uris': uris},
+    );
+    final raw = result?['ids'];
+    final ids = raw is List
+        ? raw.map((value) => value as String?).toList(growable: false)
+        : const <String?>[];
+    return DocumentIds(sdk: (result?['sdk'] as num?)?.toInt() ?? 0, ids: ids);
   }
 
   /// Copies a content URI to a normal file path.

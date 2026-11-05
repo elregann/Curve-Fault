@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 import '../services/native_storage.dart';
 import '../services/vault_service.dart';
 import '../theme/app_sizes.dart';
-import '../widgets/document_picker.dart';
+import '../widgets/lock_picker.dart';
 
 /// Screen for locking files and folders in place with CurveVault.
 class EncryptPage extends StatefulWidget {
@@ -29,17 +29,10 @@ class _EncryptPageState extends State<EncryptPage> {
   Future<void> _pickFiles() async {
     if (_vault.isBusy) return;
     try {
-      final files = await pickDocumentsFromFolder(
-        context,
-        title: 'Select Files to Lock',
-        filter: (document) =>
-            !document.name.toLowerCase().endsWith('.cvlt'),
-      );
+      final files = await pickFilesToLock(context);
       if (!mounted || files == null) return;
       if (files.isEmpty) {
-        setState(
-          () => _pickerError = 'No lockable files were found in that folder',
-        );
+        setState(() => _pickerError = 'No lockable files were selected');
         return;
       }
       setState(() {

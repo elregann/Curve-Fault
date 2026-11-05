@@ -5,10 +5,12 @@ import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.media.MediaScannerConnection
 import android.net.Uri
+import android.os.Build
 import android.os.Environment
 import android.provider.DocumentsContract
 import android.provider.MediaStore
 import android.provider.OpenableColumns
+import android.system.Os
 import android.util.Base64
 import android.util.Log
 import android.view.WindowManager
@@ -34,6 +36,8 @@ class MainActivity : FlutterFragmentActivity() {
         private const val CHANNEL = "curve_fault/storage"
         private const val TAG_LENGTH = 16
         private const val RECOVERY_MARKER = "[recovery-needed]"
+        private const val STORAGE_AUTHORITY = "com.android.externalstorage.documents"
+        private const val MEDIA_DOCUMENTS_AUTHORITY = "com.android.providers.media.documents"
         private const val REQUEST_PICK_FILES = 1201
         private const val REQUEST_PICK_FOLDER = 1202
         private const val REQUEST_SAVE_AS = 1203
@@ -68,7 +72,8 @@ class MainActivity : FlutterFragmentActivity() {
             }
         }
         data.data?.let { uris.add(it) }
-        persistPermissions(uris, data.flags)
+        // Picked files only need access for this session. Long term access
+        // comes from folder grants, so file grants are not persisted.
         runBackground(pending) { uris.map { describeUri(it) } }
     }
 
@@ -110,7 +115,13 @@ class MainActivity : FlutterFragmentActivity() {
             .setMethodCallHandler { call, result ->
                 when (call.method) {
                     "pickFiles" -> launchPickFiles(result)
-                    "pickFolder" -> launchPickFolder(result)
+                    "pickFolder" -> launchPickFolder(result, call.argument<String>("initialDocId"))
+                    "resolveDocumentIds" -> {
+                        val uris = call.argument<List<String>>("uris")
+                        if (uris == null) result.error("bad_args", "Missing uris", null)
+                        else runBackground(result) { resolveDocumentIds(uris) }
+                    }
+                    "persistedTrees" -> runBackground(result) { persistedWritableTrees() }
                     "listDocuments" -> {
                         val treeUri = call.argument<String>("treeUri")
                         val recursive = call.argument<Boolean>("recursive") ?: true
@@ -346,7 +357,7 @@ class MainActivity : FlutterFragmentActivity() {
         }
     }
 
-    private fun launchPickFolder(result: MethodChannel.Result) {
+    private fun launchPickFolder(result: MethodChannel.Result, initialDocId: String?) {
         if (pendingPickResult != null) {
             result.error("picker_busy", "A picker is already open", null)
             return
@@ -359,6 +370,12 @@ class MainActivity : FlutterFragmentActivity() {
                     Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION or
                     Intent.FLAG_GRANT_PREFIX_URI_PERMISSION,
             )
+            if (initialDocId != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                putExtra(
+                    DocumentsContract.EXTRA_INITIAL_URI,
+                    DocumentsContract.buildDocumentUri(STORAGE_AUTHORITY, initialDocId),
+                )
+            }
         }
         try {
             startActivityForResult(intent, REQUEST_PICK_FOLDER)
@@ -588,6 +605,91 @@ class MainActivity : FlutterFragmentActivity() {
             exists = false
         }
         return mapOf("exists" to exists, "name" to name, "size" to size)
+    }
+
+    private fun resolveDocumentIds(uris: List<String>): Map<String, Any?> {
+        return mapOf(
+            "sdk" to Build.VERSION.SDK_INT,
+            "ids" to uris.map { resolveDocumentId(Uri.parse(it)) },
+        )
+    }
+
+    private fun resolveDocumentId(uri: Uri): String? {
+        return try {
+            if (uri.authority == STORAGE_AUTHORITY) {
+                DocumentsContract.getDocumentId(uri)
+            } else {
+                mediaStoreDocumentId(uri) ?: pathToDocumentId(readLinkedPath(uri))
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun mediaStoreDocumentId(uri: Uri): String? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return null
+        if (uri.authority != MEDIA_DOCUMENTS_AUTHORITY) return null
+        val mediaUri = MediaStore.getMediaUri(this, uri) ?: return null
+        contentResolver.query(
+            mediaUri,
+            arrayOf(
+                MediaStore.MediaColumns.RELATIVE_PATH,
+                MediaStore.MediaColumns.DISPLAY_NAME,
+                MediaStore.MediaColumns.VOLUME_NAME,
+            ),
+            null,
+            null,
+            null,
+        )?.use { cursor ->
+            if (!cursor.moveToFirst()) return null
+            val relative = cursor.getString(0) ?: return null
+            val name = cursor.getString(1) ?: return null
+            val volume = cursor.getString(2) ?: return null
+            if (volume != MediaStore.VOLUME_EXTERNAL_PRIMARY) return null
+            return "primary:$relative$name"
+        }
+        return null
+    }
+
+    private fun readLinkedPath(uri: Uri): String? {
+        return try {
+            contentResolver.openFileDescriptor(uri, "r")?.use { descriptor ->
+                Os.readlink("/proc/self/fd/${descriptor.fd}")
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun pathToDocumentId(path: String?): String? {
+        if (path == null) return null
+        val primaryRoots = listOf(
+            "/storage/emulated/0/",
+            "/mnt/user/0/emulated/0/",
+            "/mnt/user/0/primary/",
+            "/data/media/0/",
+            "/sdcard/",
+            "/mnt/sdcard/",
+        )
+        for (root in primaryRoots) {
+            if (path.startsWith(root) && path.length > root.length) {
+                return "primary:" + path.substring(root.length)
+            }
+        }
+        val match = Regex("^/storage/([^/]+)/(.+)$").find(path) ?: return null
+        val volume = match.groupValues[1]
+        if (volume == "emulated" || volume == "self") return null
+        return "$volume:${match.groupValues[2]}"
+    }
+
+    private fun persistedWritableTrees(): List<String> {
+        return contentResolver.persistedUriPermissions
+            .filter {
+                it.isWritePermission &&
+                    DocumentsContract.isTreeUri(it.uri) &&
+                    it.uri.authority == STORAGE_AUTHORITY
+            }
+            .map { it.uri.toString() }
     }
 
     private fun walk(
