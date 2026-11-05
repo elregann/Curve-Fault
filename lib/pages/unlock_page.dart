@@ -6,7 +6,11 @@ import '../services/seed_service.dart';
 import '../services/session_service.dart';
 import '../services/vault_service.dart';
 import '../theme/app_sizes.dart';
+import '../widgets/unlock_action_tile.dart';
 import '../main.dart';
+
+/// Which unlock action is running, so only its own tile shows progress.
+enum _Busy { none, biometric, passphrase }
 
 /// Screen presented when returning to the application to unlock the master vault.
 class UnlockPage extends StatefulWidget {
@@ -19,7 +23,7 @@ class UnlockPage extends StatefulWidget {
 class _UnlockPageState extends State<UnlockPage> {
   final _passController = TextEditingController();
   bool _obscure = true;
-  bool _isLoading = false;
+  _Busy _busy = _Busy.none;
   String? _error;
   bool _biometricEnabled = false;
   bool _biometricPrompted = false;
@@ -29,6 +33,8 @@ class _UnlockPageState extends State<UnlockPage> {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) => _prepareBiometric());
   }
+
+  bool get _isBusy => _busy != _Busy.none;
 
   Future<void> _prepareBiometric() async {
     final enabled = await SeedService.isBiometricEnabled();
@@ -43,9 +49,9 @@ class _UnlockPageState extends State<UnlockPage> {
   }
 
   Future<void> _unlockWithBiometrics() async {
-    if (_isLoading) return;
+    if (_isBusy) return;
     setState(() {
-      _isLoading = true;
+      _busy = _Busy.biometric;
       _error = null;
     });
 
@@ -54,7 +60,7 @@ class _UnlockPageState extends State<UnlockPage> {
         reason: 'Unlock CurveVault with biometrics',
       );
       if (!confirmed) {
-        if (mounted) setState(() => _isLoading = false);
+        if (mounted) setState(() => _busy = _Busy.none);
         return;
       }
 
@@ -62,7 +68,7 @@ class _UnlockPageState extends State<UnlockPage> {
       if (seed == null) {
         if (mounted) {
           setState(() {
-            _isLoading = false;
+            _busy = _Busy.none;
             _error = 'Biometric unlock is not set up. Use your passphrase.';
           });
         }
@@ -73,7 +79,7 @@ class _UnlockPageState extends State<UnlockPage> {
     } catch (_) {
       if (mounted) {
         setState(() {
-          _isLoading = false;
+          _busy = _Busy.none;
           _error = 'Biometric unlock failed';
         });
       }
@@ -99,8 +105,9 @@ class _UnlockPageState extends State<UnlockPage> {
       return;
     }
 
+    if (_isBusy) return;
     setState(() {
-      _isLoading = true;
+      _busy = _Busy.passphrase;
       _error = null;
     });
 
@@ -110,7 +117,7 @@ class _UnlockPageState extends State<UnlockPage> {
       if (seed == null) {
         setState(() {
           _error = 'Wrong passphrase';
-          _isLoading = false;
+          _busy = _Busy.none;
         });
         return;
       }
@@ -128,7 +135,7 @@ class _UnlockPageState extends State<UnlockPage> {
     } catch (e) {
       setState(() {
         _error = 'Failed to unlock';
-        _isLoading = false;
+        _busy = _Busy.none;
       });
     }
   }
@@ -175,7 +182,6 @@ class _UnlockPageState extends State<UnlockPage> {
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final primaryTextColor = Theme.of(context).primaryColor;
     final secondaryTextColor = isDark ? Colors.white54 : Colors.black54;
-    final disabledTextColor = isDark ? Colors.white38 : Colors.black38;
 
     return Scaffold(
       backgroundColor: Theme.of(context).scaffoldBackgroundColor,
@@ -207,35 +213,16 @@ class _UnlockPageState extends State<UnlockPage> {
 
           if (_biometricEnabled) ...[
             const SizedBox(height: 20),
-            ListTile(
-              contentPadding: EdgeInsets.zero,
+            UnlockActionTile(
               leading: Icon(
                 Icons.fingerprint,
                 size: AppSizes.icon,
                 color: primaryTextColor,
               ),
-              title: Text(
-                'Unlock with Biometrics',
-                style: TextStyle(
-                  fontSize: AppSizes.subtitle + 1,
-                  color: primaryTextColor,
-                ),
-              ),
-              trailing: _isLoading
-                  ? SizedBox(
-                      width: 20,
-                      height: 20,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        color: secondaryTextColor,
-                      ),
-                    )
-                  : Icon(
-                      Icons.arrow_forward,
-                      color: primaryTextColor,
-                      size: AppSizes.icon,
-                    ),
-              onTap: _isLoading ? null : _unlockWithBiometrics,
+              title: 'Unlock with Biometrics',
+              titleSize: AppSizes.subtitle + 1,
+              loading: _busy == _Busy.biometric,
+              onTap: _isBusy ? null : _unlockWithBiometrics,
             ),
             Divider(color: Theme.of(context).dividerColor),
           ],
@@ -283,30 +270,12 @@ class _UnlockPageState extends State<UnlockPage> {
           const SizedBox(height: 48),
 
           // Unlock Action Button
-          ListTile(
-            contentPadding: EdgeInsets.zero,
-            title: Text(
-              _isLoading ? 'Unlocking...' : 'Unlock',
-              style: TextStyle(
-                fontSize: AppSizes.title,
-                color: _isLoading ? disabledTextColor : primaryTextColor,
-              ),
-            ),
-            trailing: _isLoading
-                ? SizedBox(
-                    width: 20,
-                    height: 20,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      color: secondaryTextColor,
-                    ),
-                  )
-                : Icon(
-                    Icons.arrow_forward,
-                    color: primaryTextColor,
-                    size: AppSizes.icon,
-                  ),
-            onTap: _isLoading ? null : _unlock,
+          UnlockActionTile(
+            title: _busy == _Busy.passphrase ? 'Unlocking...' : 'Unlock',
+            titleSize: AppSizes.title,
+            loading: _busy == _Busy.passphrase,
+            dimWhenLoading: true,
+            onTap: _isBusy ? null : _unlock,
           ),
         ],
       ),
