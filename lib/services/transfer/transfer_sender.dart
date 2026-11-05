@@ -293,12 +293,33 @@ class TransferSender extends ChangeNotifier {
     await _cleanupOutgoing();
   }
 
+  /// Ends the session if the QR validity has passed, even when the timer
+  /// did not get a chance to fire while the app was in the background.
+  Future<void> expireIfDue() async {
+    final waiting =
+        _phase == TransferPhase.waitingAnswer ||
+        _phase == TransferPhase.connecting;
+    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    if (waiting && _expiresAt > 0 && now >= _expiresAt) await _expire();
+  }
+
   Future<void> _expire() async {
+    if (_disposed ||
+        _phase == TransferPhase.expired ||
+        _phase == TransferPhase.cancelled ||
+        _phase == TransferPhase.completed ||
+        _phase == TransferPhase.failed) {
+      return;
+    }
     _expiryTimer?.cancel();
-    _inbox?.failAll(const TransferException('This session has expired'));
-    await _link?.close();
     _error = null;
     _setPhase(TransferPhase.expired);
+    _inbox?.failAll(const TransferException('This session has expired'));
+    try {
+      await _link?.close().timeout(const Duration(seconds: 5));
+    } catch (_) {
+      // The session is already marked expired; a stuck close must not hold it.
+    }
     await _cleanupOutgoing();
   }
 

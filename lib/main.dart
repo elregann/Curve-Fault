@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'models/transfer_session.dart';
 import 'pages/vault_page.dart';
 import 'pages/encrypt_page.dart';
 import 'pages/identity_page.dart';
@@ -123,17 +126,35 @@ class MainShell extends StatefulWidget {
 
 class _MainShellState extends State<MainShell> with WidgetsBindingObserver {
   int _currentIndex = 0;
+  TransferPhase _lastTransferPhase = TransferService.instance.phase;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    TransferService.instance.addListener(_onTransferChanged);
   }
 
   @override
   void dispose() {
+    TransferService.instance.removeListener(_onTransferChanged);
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
+  }
+
+  void _onTransferChanged() {
+    final service = TransferService.instance;
+    final previous = _lastTransferPhase;
+    _lastTransferPhase = service.phase;
+    final notice = TransferNotice.forChange(
+      previous,
+      service.phase,
+      isSender: service.isSender,
+    );
+    if (notice == null || !mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(notice)));
   }
 
   @override
@@ -141,6 +162,7 @@ class _MainShellState extends State<MainShell> with WidgetsBindingObserver {
     if (state == AppLifecycleState.paused) {
       AppLock.markPaused();
     } else if (state == AppLifecycleState.resumed) {
+      unawaited(TransferService.instance.checkExpiry());
       if (AppLock.takeExpired() && !VaultService.instance.isBusy) {
         _lockSession();
       }

@@ -102,6 +102,12 @@ class TransferService extends ChangeNotifier {
     await sender.acceptAnswer(answerQr);
   }
 
+  /// Expires a waiting session whose QR validity has passed.
+  Future<void> checkExpiry() async {
+    await _sender?.expireIfDue();
+    await _receiver?.expireIfDue();
+  }
+
   Future<void> cancel() async {
     final sender = _sender;
     final receiver = _receiver;
