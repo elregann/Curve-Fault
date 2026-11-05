@@ -6,6 +6,7 @@ import 'pages/setup_page.dart';
 import 'services/app_lock.dart';
 import 'services/seed_service.dart';
 import 'services/session_service.dart';
+import 'services/transfer/transfer_service.dart';
 import 'services/vault_service.dart';
 import 'theme/app_sizes.dart';
 import 'theme/theme_controller.dart';
@@ -14,6 +15,7 @@ import 'pages/unlock_page.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await ThemeController.instance.init();
+  await TransferService.instance.cleanupAtStartup();
   runApp(const CurveVaultApp());
 }
 

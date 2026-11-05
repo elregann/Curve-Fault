@@ -218,6 +218,14 @@ class MainActivity : FlutterFragmentActivity() {
                             null
                         }
                     }
+                    "startTransferService" -> {
+                        startTransferService()
+                        result.success(null)
+                    }
+                    "stopTransferService" -> {
+                        stopService(Intent(this, TransferService::class.java))
+                        result.success(null)
+                    }
                     "encryptChunks" -> {
                         val inputPath = call.argument<String>("inputPath")
                         val outputPath = call.argument<String>("outputPath")
@@ -972,6 +980,15 @@ class MainActivity : FlutterFragmentActivity() {
         }
         if (!fallback) {
             throw IOException("Could not delete the encrypted file")
+        }
+    }
+
+    private fun startTransferService() {
+        val intent = Intent(this, TransferService::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
         }
     }
 

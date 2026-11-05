@@ -5,9 +5,15 @@ import 'package:flutter/material.dart';
 
 import '../models/vault_entry.dart';
 import '../services/native_storage.dart';
+import '../services/transfer/transfer_service.dart';
 import '../services/vault_service.dart';
 import '../theme/app_sizes.dart';
 import '../widgets/document_picker.dart';
+import 'receive_secret_page.dart';
+import 'send_secret_page.dart';
+
+/// Screens the vault can be filtered to.
+enum _VaultFilter { all, mine, received }
 
 /// Screen presenting the encrypted files tracked by the vault index.
 class VaultPage extends StatefulWidget {
@@ -20,11 +26,28 @@ class VaultPage extends StatefulWidget {
 class _VaultPageState extends State<VaultPage> {
   final Set<String> _selectedIds = <String>{};
   String? _busyMessage;
+  _VaultFilter _filter = _VaultFilter.all;
 
   VaultService get _vault => VaultService.instance;
+  TransferService get _transfer => TransferService.instance;
 
   bool get _selecting => _selectedIds.isNotEmpty;
   bool get _busy => _busyMessage != null || _vault.isBusy;
+
+  List<VaultEntry> get _filteredEntries {
+    switch (_filter) {
+      case _VaultFilter.all:
+        return _vault.entries;
+      case _VaultFilter.mine:
+        return _vault.entries
+            .where((entry) => !entry.isReceived)
+            .toList(growable: false);
+      case _VaultFilter.received:
+        return _vault.entries
+            .where((entry) => entry.isReceived)
+            .toList(growable: false);
+    }
+  }
 
   List<VaultEntry> get _selectedEntries => _vault.entries
       .where((entry) => _selectedIds.contains(entry.id))
@@ -45,7 +68,7 @@ class _VaultPageState extends State<VaultPage> {
   }
 
   void _toggleSelectAll() {
-    final all = _vault.entries;
+    final all = _filteredEntries;
     setState(() {
       if (_selectedIds.length == all.length) {
         _selectedIds.clear();
@@ -55,6 +78,123 @@ class _VaultPageState extends State<VaultPage> {
           ..addAll(all.map((entry) => entry.id));
       }
     });
+  }
+
+  Future<void> _startSend() async {
+    if (_transfer.hasActive) {
+      await _resumeTransfer();
+      return;
+    }
+    if (_vault.entries.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Lock a file before sending one')),
+      );
+      return;
+    }
+
+    final entry = await showModalBottomSheet<VaultEntry>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Theme.of(context).scaffoldBackgroundColor,
+      builder: (ctx) {
+        final isDark = Theme.of(ctx).brightness == Brightness.dark;
+        final primaryColor = Theme.of(ctx).primaryColor;
+        final secondaryColor = isDark ? Colors.white54 : Colors.black54;
+        return SafeArea(
+          child: SizedBox(
+            height: MediaQuery.of(ctx).size.height * 0.6,
+            child: Column(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 18, 20, 10),
+                  child: Row(
+                    children: [
+                      Icon(Icons.send_outlined, color: primaryColor),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Text(
+                          'Choose a locked file',
+                          style: TextStyle(
+                            fontSize: AppSizes.subtitle + 1,
+                            color: primaryColor,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const Divider(height: 1),
+                Expanded(
+                  child: ListView.builder(
+                    itemCount: _vault.entries.length,
+                    itemBuilder: (context, index) {
+                      final candidate = _vault.entries[index];
+                      return ListTile(
+                        leading: Icon(
+                          _iconFor(candidate.mime),
+                          size: AppSizes.icon - 2,
+                          color: primaryColor,
+                        ),
+                        title: Text(
+                          candidate.name,
+                          style: TextStyle(
+                            fontSize: AppSizes.subtitle + 1,
+                            color: primaryColor,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        subtitle: Text(
+                          '${candidate.isReceived ? 'Received' : 'Locked'} · ${_formatBytes(candidate.size)}',
+                          style: TextStyle(
+                            color: secondaryColor,
+                            fontSize: 13,
+                          ),
+                        ),
+                        onTap: () => Navigator.of(ctx).pop(candidate),
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+    if (entry == null || !mounted) return;
+    await Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => SendSecretPage(entry: entry)),
+    );
+  }
+
+  Future<void> _startReceive() async {
+    if (_transfer.hasActive) {
+      await _resumeTransfer();
+      return;
+    }
+    await Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => const ReceiveSecretPage()),
+    );
+  }
+
+  Future<void> _resumeTransfer() async {
+    final sender = _transfer.sender;
+    final receiver = _transfer.receiver;
+    if (sender != null) {
+      await Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => SendSecretPage(entry: sender.entry, sender: sender),
+        ),
+      );
+    } else if (receiver != null) {
+      await Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => ReceiveSecretPage(receiver: receiver),
+        ),
+      );
+    }
   }
 
   Future<void> _showActions(VaultEntry entry) async {
@@ -127,19 +267,35 @@ class _VaultPageState extends State<VaultPage> {
                   ),
                   onTap: () => Navigator.of(ctx).pop('save'),
                 ),
-                ListTile(
-                  leading: Icon(Icons.restore, color: primaryColor),
-                  title: Text('Restore', style: TextStyle(color: primaryColor)),
-                  subtitle: Text(
-                    'Decrypt and put the original file back',
-                    style: TextStyle(color: secondaryColor, fontSize: 12),
+                if (!entry.isReceived)
+                  ListTile(
+                    leading: Icon(Icons.restore, color: primaryColor),
+                    title: Text(
+                      'Restore',
+                      style: TextStyle(color: primaryColor),
+                    ),
+                    subtitle: Text(
+                      'Decrypt and put the original file back',
+                      style: TextStyle(color: secondaryColor, fontSize: 12),
+                    ),
+                    onTap: () => Navigator.of(ctx).pop('restore'),
                   ),
-                  onTap: () => Navigator.of(ctx).pop('restore'),
-                ),
                 ListTile(
                   leading: Icon(Icons.share_outlined, color: primaryColor),
                   title: Text('Share', style: TextStyle(color: primaryColor)),
                   onTap: () => Navigator.of(ctx).pop('share'),
+                ),
+                ListTile(
+                  leading: Icon(Icons.send_outlined, color: primaryColor),
+                  title: Text(
+                    'Send Secret File',
+                    style: TextStyle(color: primaryColor),
+                  ),
+                  subtitle: Text(
+                    'Send this file directly to a CurveVault identity',
+                    style: TextStyle(color: secondaryColor, fontSize: 12),
+                  ),
+                  onTap: () => Navigator.of(ctx).pop('send_secret'),
                 ),
                 ListTile(
                   leading: Icon(Icons.vpn_key_outlined, color: primaryColor),
@@ -201,6 +357,20 @@ class _VaultPageState extends State<VaultPage> {
         );
       case 'share_identity':
         await _shareWithIdentity(entry);
+      case 'send_secret':
+        if (!mounted) return;
+        if (_transfer.hasActive) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Finish the current transfer first'),
+            ),
+          );
+          await _resumeTransfer();
+          return;
+        }
+        await Navigator.of(context).push(
+          MaterialPageRoute(builder: (_) => SendSecretPage(entry: entry)),
+        );
       case 'delete':
         await _deleteEntries([entry]);
     }
@@ -664,13 +834,13 @@ class _VaultPageState extends State<VaultPage> {
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
-      animation: _vault,
+      animation: Listenable.merge([_vault, _transfer]),
       builder: (context, _) {
         final isDark = Theme.of(context).brightness == Brightness.dark;
         final primaryColor = Theme.of(context).primaryColor;
         final secondaryTextColor = isDark ? Colors.white38 : Colors.black38;
         final dividerColor = Theme.of(context).dividerColor;
-        final entries = _vault.entries;
+        final entries = _filteredEntries;
         final busy = _busy;
 
         if (_selecting) {
@@ -691,6 +861,10 @@ class _VaultPageState extends State<VaultPage> {
             });
           }
         }
+
+        final restorableSelection = _selectedEntries
+            .where((entry) => !entry.isReceived)
+            .toList(growable: false);
 
         return Scaffold(
           appBar: AppBar(
@@ -713,9 +887,9 @@ class _VaultPageState extends State<VaultPage> {
                 IconButton(
                   icon: const Icon(Icons.restore),
                   tooltip: 'Restore selected',
-                  onPressed: busy || _selectedIds.isEmpty
+                  onPressed: busy || restorableSelection.isEmpty
                       ? null
-                      : () => _restoreEntries(_selectedEntries),
+                      : () => _restoreEntries(restorableSelection),
                 ),
                 IconButton(
                   icon: const Icon(Icons.delete_outline),
@@ -826,12 +1000,141 @@ class _VaultPageState extends State<VaultPage> {
                     ),
                   ),
                 ),
+              ListTile(
+                enabled: !busy,
+                leading: Icon(
+                  Icons.send_outlined,
+                  size: AppSizes.icon,
+                  color: busy ? secondaryTextColor : primaryColor,
+                ),
+                title: Text(
+                  'Send Secret File',
+                  style: TextStyle(
+                    fontSize: AppSizes.title,
+                    color: busy ? secondaryTextColor : primaryColor,
+                  ),
+                ),
+                subtitle: Text(
+                  'Share a locked file directly with a friend',
+                  style: TextStyle(
+                    color: secondaryTextColor,
+                    fontSize: AppSizes.subtitle,
+                  ),
+                ),
+                onTap: busy ? null : _startSend,
+              ),
+              const Divider(height: 1),
+              ListTile(
+                enabled: !busy,
+                leading: Icon(
+                  Icons.download_outlined,
+                  size: AppSizes.icon,
+                  color: busy ? secondaryTextColor : primaryColor,
+                ),
+                title: Text(
+                  'Receive Secret File',
+                  style: TextStyle(
+                    fontSize: AppSizes.title,
+                    color: busy ? secondaryTextColor : primaryColor,
+                  ),
+                ),
+                subtitle: Text(
+                  'Scan a friend\'s QR code to receive a file',
+                  style: TextStyle(
+                    color: secondaryTextColor,
+                    fontSize: AppSizes.subtitle,
+                  ),
+                ),
+                onTap: busy ? null : _startReceive,
+              ),
+              const Divider(height: 1),
+              if (_transfer.hasActive)
+                Container(
+                  width: double.infinity,
+                  color: isDark
+                      ? const Color(0xFF141414)
+                      : const Color(0xFFF4F4F4),
+                  padding: const EdgeInsets.fromLTRB(20, 10, 12, 10),
+                  child: Row(
+                    children: [
+                      Icon(
+                        Icons.swap_horiz,
+                        size: AppSizes.icon - 4,
+                        color: primaryColor,
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'Transfer in progress',
+                              style: TextStyle(
+                                color: primaryColor,
+                                fontSize: 13,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                            Text(
+                              _transfer.activeLabel,
+                              style: TextStyle(
+                                color: secondaryTextColor,
+                                fontSize: 12,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ],
+                        ),
+                      ),
+                      TextButton(
+                        onPressed: _resumeTransfer,
+                        child: Text(
+                          'Resume',
+                          style: TextStyle(color: primaryColor),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 12, 20, 4),
+                child: Wrap(
+                  spacing: 8,
+                  children: [
+                    for (final filter in _VaultFilter.values)
+                      ChoiceChip(
+                        label: Text(_filterLabel(filter)),
+                        selected: _filter == filter,
+                        labelStyle: TextStyle(
+                          color: _filter == filter
+                              ? (isDark ? Colors.black : Colors.white)
+                              : primaryColor,
+                          fontSize: 13,
+                        ),
+                        selectedColor: primaryColor,
+                        backgroundColor: Colors.transparent,
+                        side: BorderSide(
+                          color: isDark ? Colors.white24 : Colors.black26,
+                        ),
+                        onSelected: busy
+                            ? null
+                            : (_) => setState(() {
+                                _filter = filter;
+                                _selectedIds.clear();
+                              }),
+                      ),
+                  ],
+                ),
+              ),
               Expanded(
                 child: entries.isEmpty
                     ? _EmptyState(
                         primaryColor: primaryColor,
                         secondaryTextColor: secondaryTextColor,
                         onRecover: busy ? null : _recoverFolder,
+                        title: _emptyTitle,
+                        subtitle: _emptySubtitle,
                       )
                     : ListView.separated(
                         itemCount: entries.length,
@@ -854,7 +1157,9 @@ class _VaultPageState extends State<VaultPage> {
                                     color: primaryColor,
                                   )
                                 : Icon(
-                                    _iconFor(entry.mime),
+                                    entry.isReceived
+                                        ? Icons.download_for_offline_outlined
+                                        : _iconFor(entry.mime),
                                     size: AppSizes.icon - 2,
                                     color: primaryColor,
                                   ),
@@ -868,7 +1173,9 @@ class _VaultPageState extends State<VaultPage> {
                               overflow: TextOverflow.ellipsis,
                             ),
                             subtitle: Text(
-                              _formatDate(entry.addedAt),
+                              entry.isReceived
+                                  ? 'Received · ${_formatDate(entry.receivedAt ?? entry.addedAt)}'
+                                  : _formatDate(entry.addedAt),
                               style: TextStyle(
                                 color: secondaryTextColor,
                                 fontSize: 13,
@@ -904,6 +1211,39 @@ class _VaultPageState extends State<VaultPage> {
     );
   }
 
+  String get _emptyTitle {
+    switch (_filter) {
+      case _VaultFilter.all:
+        return 'No encrypted files';
+      case _VaultFilter.mine:
+        return 'No locked files yet';
+      case _VaultFilter.received:
+        return 'No received files yet';
+    }
+  }
+
+  String get _emptySubtitle {
+    switch (_filter) {
+      case _VaultFilter.all:
+        return 'Files you lock stay in their original folder and disappear from the gallery.';
+      case _VaultFilter.mine:
+        return 'Files you lock yourself will appear here.';
+      case _VaultFilter.received:
+        return 'Secret files sent by friends will appear here after they are verified.';
+    }
+  }
+
+  static String _filterLabel(_VaultFilter filter) {
+    switch (filter) {
+      case _VaultFilter.all:
+        return 'All';
+      case _VaultFilter.mine:
+        return 'Mine';
+      case _VaultFilter.received:
+        return 'Received';
+    }
+  }
+
   static IconData _iconFor(String mime) {
     if (mime.startsWith('image/')) return Icons.image_outlined;
     if (mime.startsWith('video/')) return Icons.videocam_outlined;
@@ -937,11 +1277,15 @@ class _EmptyState extends StatelessWidget {
     required this.primaryColor,
     required this.secondaryTextColor,
     required this.onRecover,
+    required this.title,
+    required this.subtitle,
   });
 
   final Color primaryColor;
   final Color secondaryTextColor;
   final VoidCallback? onRecover;
+  final String title;
+  final String subtitle;
 
   @override
   Widget build(BuildContext context) {
@@ -958,7 +1302,7 @@ class _EmptyState extends StatelessWidget {
             ),
             const SizedBox(height: 20),
             Text(
-              'No encrypted files',
+              title,
               style: TextStyle(
                 color: primaryColor,
                 fontSize: AppSizes.title,
@@ -967,7 +1311,7 @@ class _EmptyState extends StatelessWidget {
             ),
             const SizedBox(height: 8),
             Text(
-              'Files you lock stay in their original folder and disappear from the gallery.',
+              subtitle,
               textAlign: TextAlign.center,
               style: TextStyle(
                 color: secondaryTextColor,

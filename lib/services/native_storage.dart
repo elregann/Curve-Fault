@@ -371,6 +371,27 @@ class NativeStorage {
       'displayName': displayName,
     });
   }
+
+  /// Starts the Android foreground service that keeps an active peer transfer
+  /// alive while the user is in another app. Safe no-op elsewhere.
+  static Future<void> startTransferService() async {
+    if (!isSupported) return;
+    try {
+      await _channel.invokeMethod<void>('startTransferService');
+    } catch (_) {
+      // A missing service must not break the transfer itself.
+    }
+  }
+
+  /// Stops the transfer foreground service. Safe to call more than once.
+  static Future<void> stopTransferService() async {
+    if (!isSupported) return;
+    try {
+      await _channel.invokeMethod<void>('stopTransferService');
+    } catch (_) {
+      // Best-effort only.
+    }
+  }
 }
 
 /// Native Android AES-256-GCM chunk cipher used for large files.

@@ -10,6 +10,8 @@ import '../crypto/curve256189.dart';
 import '../models/vault_entry.dart';
 import 'native_storage.dart';
 import 'session_service.dart';
+import 'transfer/transfer_auth.dart';
+import 'transfer/transfer_storage.dart';
 import 'vault_crypto.dart';
 
 /// Result of a bulk lock operation.
@@ -20,6 +22,23 @@ class VaultLockSummary {
   final List<String> failures;
 
   bool get hasFailures => failures.isNotEmpty;
+}
+
+/// A temporary encrypted container prepared for another identity.
+class PreparedShare {
+  const PreparedShare({
+    required this.container,
+    required this.name,
+    required this.mime,
+    required this.size,
+  });
+
+  final File container;
+  final String name;
+  final String mime;
+
+  /// Plaintext size of the file inside the container.
+  final int size;
 }
 
 /// Journal record for a lock that started but is not yet in the index.
@@ -138,6 +157,7 @@ class VaultService extends ChangeNotifier {
     await _cleanWorkDir();
     await _loadIndex();
     await _resolvePending();
+    await importPendingReceived();
     notifyListeners();
   }
 
@@ -367,8 +387,28 @@ class VaultService extends ChangeNotifier {
     _requireUnlocked();
     final work = await _workDir();
     final id = DateTime.now().microsecondsSinceEpoch;
-    final container = File('${work.path}/${entry.id}_$id.cvlt');
     final output = File('${work.path}/${_safeFileName(entry.name)}');
+
+    if (isLocalUri(entry.uri)) {
+      final local = File(_localPath(entry.uri));
+      if (!local.existsSync()) {
+        throw VaultCryptoException('The received file is missing');
+      }
+      try {
+        await VaultCrypto.decryptFile(
+          containerPath: local.path,
+          outputPath: output.path,
+          vaultKey: _vaultKey!,
+          privateKey: _privateKey,
+        );
+        return output;
+      } catch (_) {
+        _safeDelete(output);
+        rethrow;
+      }
+    }
+
+    final container = File('${work.path}/${entry.id}_$id.cvlt');
     try {
       await NativeStorage.copyDocumentToFile(entry.uri, container.path);
       await VaultCrypto.decryptFile(
@@ -383,6 +423,62 @@ class VaultService extends ChangeNotifier {
       rethrow;
     } finally {
       _safeDelete(container);
+    }
+  }
+
+  /// Encrypts a copy of [entry] for [recipientPublicKey].
+  ///
+  /// The returned container is temporary and owned by the caller. [outputPath]
+  /// lets a peer transfer keep the container outside the cache directory, so
+  /// it survives an unlock that clears the working directory.
+  Future<PreparedShare> prepareSharedContainer(
+    VaultEntry entry,
+    Uint8List recipientPublicKey, {
+    String? outputPath,
+  }) async {
+    _requireUnlocked();
+    if (recipientPublicKey.length != 32) {
+      throw VaultCryptoException('Recipient public key must be 32 bytes');
+    }
+
+    final work = await _workDir();
+    final plaintext = await decryptToTemp(entry);
+    final container = File(
+      outputPath ??
+          '${work.path}/share_${DateTime.now().microsecondsSinceEpoch}.cvlt',
+    );
+    try {
+      final sharedId = _newEntryId();
+      final info = await VaultCrypto.encryptFile(
+        inputPath: plaintext.path,
+        outputPath: container.path,
+        vaultKey: _vaultKey!,
+        metadata: {
+          'id': sharedId,
+          'name': entry.name,
+          'mime': entry.mime,
+          'relativePath': entry.relativePath,
+          'addedAt': DateTime.now().millisecondsSinceEpoch,
+          'shared': true,
+        },
+        recipientPublicKey: recipientPublicKey,
+      );
+      await VaultCrypto.verifyFile(
+        containerPath: container.path,
+        vaultKey: _vaultKey!,
+        privateKey: _privateKey,
+      );
+      return PreparedShare(
+        container: container,
+        name: entry.name,
+        mime: entry.mime,
+        size: info.plaintextLength,
+      );
+    } catch (_) {
+      _safeDelete(container);
+      rethrow;
+    } finally {
+      _safeDelete(plaintext);
     }
   }
 
@@ -408,6 +504,11 @@ class VaultService extends ChangeNotifier {
   /// entry is only removed after the plaintext is safely on disk.
   Future<void> restore(VaultEntry entry) async {
     _requireUnlocked();
+    if (entry.isReceived) {
+      throw VaultCryptoException(
+        'Received files can be saved with Save a Copy',
+      );
+    }
     final work = await _workDir();
     final stamp = DateTime.now().microsecondsSinceEpoch;
     final container = File('${work.path}/${entry.id}_$stamp.cvlt');
@@ -481,51 +582,17 @@ class VaultService extends ChangeNotifier {
     VaultEntry entry,
     Uint8List recipientPublicKey,
   ) async {
-    _requireUnlocked();
-    if (recipientPublicKey.length != 32) {
-      throw VaultCryptoException('Recipient public key must be 32 bytes');
-    }
-
-    final work = await _workDir();
-    final plaintext = await decryptToTemp(entry);
-    final container = File(
-      '${work.path}/share_${DateTime.now().microsecondsSinceEpoch}.cvlt',
-    );
-    var shared = false;
+    final prepared = await prepareSharedContainer(entry, recipientPublicKey);
     try {
-      final sharedId = _newEntryId();
-      await VaultCrypto.encryptFile(
-        inputPath: plaintext.path,
-        outputPath: container.path,
-        vaultKey: _vaultKey!,
-        metadata: {
-          'id': sharedId,
-          'name': entry.name,
-          'mime': entry.mime,
-          'relativePath': entry.relativePath,
-          'addedAt': DateTime.now().millisecondsSinceEpoch,
-          'shared': true,
-        },
-        recipientPublicKey: recipientPublicKey,
-      );
-      await VaultCrypto.verifyFile(
-        containerPath: container.path,
-        vaultKey: _vaultKey!,
-        privateKey: _privateKey,
-      );
       await NativeStorage.shareFile(
-        sourcePath: container.path,
+        sourcePath: prepared.container.path,
         mime: 'application/octet-stream',
-        displayName: '${entry.name}.cvlt',
+        displayName: '${prepared.name}.cvlt',
       );
-      shared = true;
-      _scheduleCleanup(container);
-      _scheduleCleanup(plaintext);
-    } finally {
-      if (!shared) {
-        _safeDelete(container);
-        _safeDelete(plaintext);
-      }
+      _scheduleCleanup(prepared.container);
+    } catch (_) {
+      _safeDelete(prepared.container);
+      rethrow;
     }
   }
 
@@ -546,7 +613,15 @@ class VaultService extends ChangeNotifier {
     final failures = <String>[];
     for (final entry in entries) {
       try {
-        await NativeStorage.deleteDocument(entry.uri);
+        if (isLocalUri(entry.uri)) {
+          final file = File(_localPath(entry.uri));
+          if (file.existsSync()) {
+            await file.delete();
+          }
+          await TransferStorage.instance.deleteSidecar(file);
+        } else {
+          await NativeStorage.deleteDocument(entry.uri);
+        }
         _entries.removeWhere((candidate) => candidate.id == entry.id);
       } catch (error) {
         failures.add('${entry.name}: ${_messageFor(error)}');
@@ -555,6 +630,132 @@ class VaultService extends ChangeNotifier {
     await _saveIndex();
     notifyListeners();
     return failures;
+  }
+
+  /// Imports received containers that already have a signed sidecar on disk.
+  ///
+  /// Returns the number of entries added. Safe to call while the vault is
+  /// locked: it simply does nothing until the next unlock.
+  Future<int> importPendingReceived() async {
+    if (!_unlocked || _vaultKey == null) return 0;
+    final List<ReceivedBundle> bundles;
+    try {
+      bundles = await TransferStorage.instance.listPendingBundles();
+    } catch (_) {
+      return 0;
+    }
+
+    var imported = 0;
+    final importedBundles = <ReceivedBundle>[];
+    for (final bundle in bundles) {
+      try {
+        final entry = await _importReceivedBundle(bundle);
+        if (entry != null) {
+          imported++;
+          importedBundles.add(bundle);
+        }
+      } catch (_) {
+        // Keep the sidecar so a later unlock can retry.
+      }
+    }
+    if (imported > 0) {
+      _entries.sort((a, b) => b.addedAt.compareTo(a.addedAt));
+      await _saveIndex();
+      notifyListeners();
+    }
+    // Sidecars are only removed once the index that references the containers
+    // is safely on disk, so a crash here cannot lose a received file.
+    for (final bundle in importedBundles) {
+      try {
+        await TransferStorage.instance.deleteSidecar(bundle.container);
+      } catch (_) {
+        // The next unlock sees a duplicate and retries the cleanup.
+      }
+    }
+    return imported;
+  }
+
+  Future<VaultEntry?> _importReceivedBundle(ReceivedBundle bundle) async {
+    final manifest = bundle.manifest;
+    final ownKey = SessionService.publicKeyHex;
+    if (ownKey == null ||
+        !TransferAuth.constantTimeEqualsHex(
+          manifest.recipientPublicKey,
+          ownKey,
+        )) {
+      throw VaultCryptoException('This file is not addressed to this identity');
+    }
+    final verified = await TransferAuth.verifyManifest(
+      manifest: manifest,
+      signature: bundle.signature,
+    );
+    if (!verified) {
+      throw VaultCryptoException('The received manifest is not valid');
+    }
+
+    final size = bundle.container.lengthSync();
+    if (size <= 0 || size != manifest.containerSize) {
+      throw VaultCryptoException('The received file is incomplete');
+    }
+
+    final hash = await TransferStorage.instance.hashFileHex(bundle.container);
+    if (!TransferAuth.constantTimeEqualsHex(hash, manifest.sha256)) {
+      throw VaultCryptoException('The received file failed verification');
+    }
+
+    final info = VaultCrypto.readInfo(
+      containerPath: bundle.container.path,
+      vaultKey: _vaultKey!,
+      privateKey: _privateKey,
+    );
+    if (info.plaintextLength != manifest.size) {
+      throw VaultCryptoException('The received file size does not match');
+    }
+
+    final uri = Uri.file(bundle.container.path).toString();
+    VaultEntry? duplicate;
+    for (final entry in _entries) {
+      if (entry.isReceived &&
+          entry.contentHash != null &&
+          TransferAuth.constantTimeEqualsHex(
+            entry.contentHash!,
+            manifest.sha256,
+          )) {
+        duplicate = entry;
+        break;
+      }
+    }
+    if (duplicate != null) {
+      await TransferStorage.instance.deleteSidecar(bundle.container);
+      // Only remove the duplicate container when the existing entry does not
+      // point at the very same file (for example, a retried sidecar cleanup).
+      if (duplicate.uri != uri) {
+        try {
+          if (bundle.container.existsSync()) {
+            await bundle.container.delete();
+          }
+        } catch (_) {
+          // A leftover duplicate is harmless and can be removed manually.
+        }
+      }
+      return null;
+    }
+
+    final entry = VaultEntry(
+      id: _fallbackId(uri),
+      uri: uri,
+      name: manifest.name,
+      mime: manifest.mime,
+      size: info.plaintextLength,
+      relativePath: 'received',
+      addedAt: bundle.receivedAt,
+      source: VaultSource.received,
+      senderPublicKey: manifest.senderPublicKey,
+      receivedAt: bundle.receivedAt,
+      contentHash: manifest.sha256,
+    );
+    _entries.add(entry);
+    return entry;
   }
 
   Future<VaultEntry> _lockOne(NativeDocument doc) async {
@@ -912,6 +1113,15 @@ class VaultService extends ChangeNotifier {
     if (!_unlocked || _vaultKey == null) {
       throw StateError('Vault is locked');
     }
+  }
+
+  /// Whether [uri] points at an app-private file rather than a SAF document.
+  static bool isLocalUri(String uri) {
+    return uri.startsWith('file:');
+  }
+
+  static String _localPath(String uri) {
+    return Uri.parse(uri).toFilePath();
   }
 
   static bool _isVaultContainer(String name) {
