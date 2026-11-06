@@ -374,12 +374,52 @@ class NativeStorage {
 
   /// Starts the Android foreground service that keeps an active peer transfer
   /// alive while the user is in another app. Safe no-op elsewhere.
-  static Future<void> startTransferService() async {
-    if (!isSupported) return;
+  ///
+  /// Returns `false` when the service could not be started, so the caller does
+  /// not keep sending updates to a service that is not there.
+  static Future<bool> startTransferService({
+    String? mode,
+    String? title,
+    String? text,
+    int? progress,
+  }) async {
+    if (!isSupported) return false;
     try {
-      await _channel.invokeMethod<void>('startTransferService');
+      await _channel.invokeMethod<void>('startTransferService', {
+        'mode': mode,
+        'title': title,
+        'text': text,
+        'progress': progress,
+      });
+      return true;
     } catch (_) {
       // A missing service must not break the transfer itself.
+      return false;
+    }
+  }
+
+  /// Updates the running transfer notification.
+  ///
+  /// Returns `false` when the update could not be delivered, so the caller can
+  /// retry on its next change. Ignored natively when the service is not running.
+  static Future<bool> updateTransferNotification({
+    required String mode,
+    required String title,
+    required String text,
+    int? progress,
+  }) async {
+    if (!isSupported) return false;
+    try {
+      await _channel.invokeMethod<void>('updateTransferNotification', {
+        'mode': mode,
+        'title': title,
+        'text': text,
+        'progress': progress,
+      });
+      return true;
+    } catch (_) {
+      // The notification text is cosmetic.
+      return false;
     }
   }
 

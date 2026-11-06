@@ -28,6 +28,7 @@ class TransferService extends ChangeNotifier {
   VoidCallback? _attachedListener;
   ChangeNotifier? _attached;
   bool _nativeRunning = false;
+  TransferNotificationSpec? _lastSpec;
 
   TransferSender? get sender => _sender;
   TransferReceiver? get receiver => _receiver;
@@ -139,11 +140,44 @@ class TransferService extends ChangeNotifier {
     if (!active && _nativeRunning) {
       _stopNativeSoon();
     }
+    _pushNotification();
     notifyListeners();
+  }
+
+  TransferNotificationSpec? _currentSpec() {
+    return TransferNotificationSpec.forState(
+      phase,
+      isSender: isSender,
+      progress: progress,
+    );
+  }
+
+  /// Sends the notification wording only when it actually changed. Progress
+  /// is whole percents, so a transfer sends at most about a hundred updates.
+  void _pushNotification() {
+    if (!_nativeRunning) return;
+    final spec = _currentSpec();
+    if (spec == null || spec == _lastSpec) return;
+    _lastSpec = spec;
+    unawaited(
+      NativeStorage.updateTransferNotification(
+        mode: spec.mode.name,
+        title: spec.title,
+        text: spec.text,
+        progress: spec.progress,
+      ).then((sent) {
+        // Only remember the state that reached the service, so a failed
+        // update is retried on the next flow change.
+        if (!sent && _lastSpec == spec) {
+          _lastSpec = null;
+        }
+      }),
+    );
   }
 
   void _stopNativeSoon() {
     _nativeRunning = false;
+    _lastSpec = null;
     unawaited(NativeStorage.stopTransferService());
     unawaited(WakelockPlus.disable().catchError((Object _) {}));
   }
@@ -151,7 +185,23 @@ class TransferService extends ChangeNotifier {
   Future<void> _beginSession() async {
     if (!_nativeRunning) {
       _nativeRunning = true;
-      await NativeStorage.startTransferService();
+      final spec = _currentSpec();
+      _lastSpec = spec;
+      final started = await NativeStorage.startTransferService(
+        mode: spec?.mode.name,
+        title: spec?.title,
+        text: spec?.text,
+        progress: spec?.progress,
+      );
+      if (!started) {
+        _nativeRunning = false;
+        _lastSpec = null;
+      } else if (_nativeRunning) {
+        // The phase can move while the service warms up. Re-send the current
+        // state once it exists so the notification never stays on the first one.
+        _lastSpec = null;
+        _pushNotification();
+      }
       try {
         await WakelockPlus.enable();
       } catch (_) {
@@ -177,6 +227,7 @@ class TransferService extends ChangeNotifier {
   Future<void> _stopNativeSession() async {
     if (!_nativeRunning) return;
     _nativeRunning = false;
+    _lastSpec = null;
     await NativeStorage.stopTransferService();
     try {
       await WakelockPlus.disable();

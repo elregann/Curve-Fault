@@ -276,6 +276,14 @@ class _SendSecretPageState extends State<SendSecretPage> {
             style: TextStyle(color: secondaryColor, fontSize: 12, height: 1.35),
           ),
         ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(20, 8, 20, 0),
+          child: Text(
+            'The file is end-to-end encrypted and sent only to the other '
+            'device, using your internet data. Nothing is stored online.',
+            style: TextStyle(color: secondaryColor, fontSize: 12, height: 1.35),
+          ),
+        ),
         if (_error != null)
           Padding(
             padding: const EdgeInsets.fromLTRB(20, 16, 20, 0),

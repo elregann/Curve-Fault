@@ -219,10 +219,36 @@ class MainActivity : FlutterFragmentActivity() {
                         }
                     }
                     "startTransferService" -> {
-                        startTransferService()
+                        TransferService.markStarting()
+                        try {
+                            startTransferService(
+                                call.argument<String>("mode"),
+                                call.argument<String>("title"),
+                                call.argument<String>("text"),
+                                call.argument<Int>("progress") ?: 0,
+                            )
+                            result.success(null)
+                        } catch (error: RuntimeException) {
+                            TransferService.markStopping()
+                            result.error(
+                                "start_failed",
+                                error.message ?: "Could not start the transfer service",
+                                null,
+                            )
+                        }
+                    }
+                    "updateTransferNotification" -> {
+                        TransferService.update(
+                            this,
+                            call.argument<String>("mode"),
+                            call.argument<String>("title"),
+                            call.argument<String>("text"),
+                            call.argument<Int>("progress") ?: 0,
+                        )
                         result.success(null)
                     }
                     "stopTransferService" -> {
+                        TransferService.markStopping()
                         stopService(Intent(this, TransferService::class.java))
                         result.success(null)
                     }
@@ -983,8 +1009,17 @@ class MainActivity : FlutterFragmentActivity() {
         }
     }
 
-    private fun startTransferService() {
+    private fun startTransferService(
+        mode: String?,
+        title: String?,
+        text: String?,
+        progress: Int,
+    ) {
         val intent = Intent(this, TransferService::class.java)
+            .putExtra(TransferService.EXTRA_MODE, mode)
+            .putExtra(TransferService.EXTRA_TITLE, title)
+            .putExtra(TransferService.EXTRA_TEXT, text)
+            .putExtra(TransferService.EXTRA_PROGRESS, progress)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             startForegroundService(intent)
         } else {
