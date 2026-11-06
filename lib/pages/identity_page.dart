@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import '../services/biometric_service.dart';
 import '../services/seed_service.dart';
@@ -782,6 +783,46 @@ class _IdentityPageState extends State<IdentityPage> {
             ),
             onTap: _showWipeConfirmationDialog,
           ),
+
+          const SizedBox(height: AppSizes.sectionSpacing),
+          Container(
+            margin: const EdgeInsets.symmetric(horizontal: 16),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+            decoration: BoxDecoration(
+              color: isDark ? Colors.white12 : Colors.black12,
+            ),
+            child: FutureBuilder<PackageInfo>(
+              future: PackageInfo.fromPlatform(),
+              builder: (context, snapshot) {
+                final info = snapshot.data;
+                final version = info == null
+                    ? '...'
+                    : '${info.version} (build ${info.buildNumber})';
+                return Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      'VERSION',
+                      style: TextStyle(
+                        color: secondaryTextColor,
+                        fontSize: 12,
+                        letterSpacing: 1,
+                      ),
+                    ),
+                    Text(
+                      version,
+                      style: TextStyle(
+                        color: primaryColor,
+                        fontSize: AppSizes.subtitle,
+                        fontFamily: 'monospace',
+                      ),
+                    ),
+                  ],
+                );
+              },
+            ),
+          ),
+          const SizedBox(height: 32),
         ],
       ),
     );

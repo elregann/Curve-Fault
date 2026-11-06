@@ -1289,45 +1289,48 @@ class _EmptyState extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Center(
-      child: Padding(
+    return LayoutBuilder(
+      builder: (context, constraints) => SingleChildScrollView(
         padding: const EdgeInsets.symmetric(horizontal: 32),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(
-              Icons.lock_outline,
-              size: AppSizes.icon + 30,
-              color: primaryColor,
-            ),
-            const SizedBox(height: 20),
-            Text(
-              title,
-              style: TextStyle(
+        child: ConstrainedBox(
+          constraints: BoxConstraints(minHeight: constraints.maxHeight),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(
+                Icons.lock_outline,
+                size: AppSizes.icon + 30,
                 color: primaryColor,
-                fontSize: AppSizes.title,
-                fontWeight: FontWeight.w500,
               ),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              subtitle,
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                color: secondaryTextColor,
-                fontSize: AppSizes.subtitle,
-                height: 1.4,
+              const SizedBox(height: 20),
+              Text(
+                title,
+                style: TextStyle(
+                  color: primaryColor,
+                  fontSize: AppSizes.title,
+                  fontWeight: FontWeight.w500,
+                ),
               ),
-            ),
-            const SizedBox(height: 28),
-            TextButton(
-              onPressed: onRecover,
-              child: Text(
-                'Recover Folder',
-                style: TextStyle(color: primaryColor),
+              const SizedBox(height: 8),
+              Text(
+                subtitle,
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: secondaryTextColor,
+                  fontSize: AppSizes.subtitle,
+                  height: 1.4,
+                ),
               ),
-            ),
-          ],
+              const SizedBox(height: 28),
+              TextButton(
+                onPressed: onRecover,
+                child: Text(
+                  'Recover Folder',
+                  style: TextStyle(color: primaryColor),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
