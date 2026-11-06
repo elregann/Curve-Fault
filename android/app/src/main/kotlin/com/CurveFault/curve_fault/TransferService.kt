@@ -58,6 +58,7 @@ class TransferService : Service() {
         fun markStarting() {
             starting = true
             pendingUpdate = null
+            startedAt = 0L
         }
 
         /** Drops late updates so they cannot surface in a later session. */
@@ -65,6 +66,7 @@ class TransferService : Service() {
             starting = false
             running = false
             pendingUpdate = null
+            startedAt = 0L
         }
 
         /** Refreshes the notification, but never recreates a stopped one. */
