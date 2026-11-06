@@ -26,8 +26,11 @@ class _SetupPageState extends State<SetupPage> {
     final pass = _passController.text.trim();
     final confirm = _confirmController.text.trim();
 
-    if (pass.length < 8) {
-      setState(() => _error = 'Passphrase must be at least 8 characters');
+    if (pass.length < SeedService.minPassphraseLength) {
+      setState(
+        () => _error =
+            'Passphrase must be at least ${SeedService.minPassphraseLength} characters',
+      );
       return;
     }
     if (pass != confirm) {
@@ -61,8 +64,11 @@ class _SetupPageState extends State<SetupPage> {
     final pass = _passController.text.trim();
     final confirm = _confirmController.text.trim();
 
-    if (pass.length < 8) {
-      setState(() => _error = 'Passphrase must be at least 8 characters');
+    if (pass.length < SeedService.minPassphraseLength) {
+      setState(
+        () => _error =
+            'Passphrase must be at least ${SeedService.minPassphraseLength} characters',
+      );
       return;
     }
     if (pass != confirm) {
@@ -262,7 +268,9 @@ class _SetupPageState extends State<SetupPage> {
           ),
           const SizedBox(height: 8),
           Text(
-            'This passphrase protects your Master Seed. Make sure you remember it.',
+            'This passphrase protects your Master Seed. Use at least '
+            '${SeedService.minPassphraseLength} characters and make sure you '
+            'remember it.',
             style: TextStyle(
               color: secondaryTextColor,
               fontSize: AppSizes.subtitle,

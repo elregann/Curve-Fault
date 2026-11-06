@@ -121,7 +121,7 @@ Bulk file content is intentionally **not** pushed through the curve code. Each f
 
 ### Protection and app lock
 
-- Passphrase-protected master seed, encrypted with a PBKDF2-derived key.
+- Passphrase-protected master seed, wrapped with an Argon2id-derived key (19 MiB, 2 passes).
 - Optional biometric unlock using the device's fingerprint/face sensor.
 - Automatic lock after 60 seconds in the background, clearing in-memory keys.
 - Change passphrase and export the master seed for backup/restore.
@@ -136,7 +136,7 @@ Bulk file content is intentionally **not** pushed through the curve code. Each f
 
 ```text
 passphrase
-    │  PBKDF2-HMAC-SHA256, 60,000 iterations, random salt
+    │  Argon2id, 19 MiB memory, 2 passes, 1 lane, random 16-byte salt
     ▼
   KEK ─── AES-256-GCM ───▶ encrypted master seed (Android secure storage)
                                 │  32 bytes
@@ -154,6 +154,7 @@ passphrase
 - The **vault key** is derived with HKDF-SHA256 using the `CurveVault-v1` salt and `vault-key` info.
 - The **identity keypair** is deterministically derived from the same seed, so restoring the seed restores the identity.
 - The **vault index** is encrypted with AES-256-GCM and the `CurveVault-index-v1` associated data.
+- The **seed record** stores its KDF parameters (`m`, `t`, `p`) and binds them to the ciphertext with AES-GCM associated data, so a stored-parameter downgrade fails authentication instead of silently weakening the KDF.
 
 ### Container format (`CFV1`)
 
@@ -239,7 +240,7 @@ Sender                                          Receiver
 | File contents at rest | AES-256-GCM, random per-file key, authenticated chunks |
 | Key wrapping | Vault key or Curve256189 ECDH + HKDF + AES-GCM |
 | Vault index | AES-256-GCM with domain-separated AAD |
-| Master seed | PBKDF2-HMAC-SHA256 (60,000 iterations) + AES-GCM, stored in platform-encrypted storage |
+| Master seed | Argon2id (19 MiB, 2 passes, 1 lane) + AES-GCM, parameters bound via AAD, stored in platform-encrypted storage |
 | Identity | XEdDSA signatures over Curve256189 |
 | Transfer authenticity | Signed auth, proof of possession, and signed manifest |
 | Transfer integrity | SHA-256 of the whole container + size checks + AEAD tags |
@@ -260,7 +261,7 @@ Sender                                          Receiver
 
 - A compromised, rooted, or malware-infected device.
 - Keyloggers, screen capture, or a malicious keyboard.
-- Weak user passphrases (PBKDF2 is not memory-hard).
+- Weak user passphrases (Argon2id is memory-hard, but no KDF can rescue a low-entropy passphrase).
 - Traffic analysis or denial of service by the network/TURN relay.
 - Compromise of the Flutter, Dart, or third-party package supply chain.
 - Physical coercion or legal compulsion.
@@ -279,7 +280,7 @@ Sender                                          Receiver
 | Layer | Technology |
 | --- | --- |
 | UI | Flutter / Material, custom light and dark retro themes |
-| Cryptography | Custom Curve256189 (`lib/crypto/src`), `crypto`, `pointycastle` |
+| Cryptography | Custom Curve256189 (`lib/crypto/src`), `pointycastle` (Argon2id, AES-GCM), `crypto` |
 | File encryption | AES-256-GCM (native on Android, pure Dart fallback) |
 | Local secrets | `flutter_secure_storage` (EncryptedSharedPreferences) |
 | Biometrics | `local_auth` |
@@ -296,6 +297,7 @@ Sender                                          Receiver
 lib/
 ├── crypto/
 │   ├── curve256189.dart          # Public crypto exports
+│   ├── passphrase_kdf.dart       # Argon2id KDF and AAD binding
 │   └── src/                      # Curve256189, XEdDSA, Elligator, HKDF, AES-GCM
 ├── models/
 │   ├── vault_entry.dart          # Vault metadata and source tracking
@@ -320,6 +322,8 @@ lib/
 └── theme/                        # App sizing and theme controller
 
 test/
+├── passphrase_kdf_test.dart
+├── seed_service_test.dart
 ├── vault_crypto_test.dart
 ├── vault_crypto_tamper_test.dart
 ├── vault_recovery_test.dart
@@ -393,7 +397,7 @@ dart run flutter_launcher_icons
 
 ### First use
 
-1. Create a passphrase (at least 8 characters) or restore an existing 32-byte master seed.
+1. Create a passphrase (at least 12 characters) or restore an existing 32-byte master seed.
 2. Open the **Encrypt** tab and lock a file or folder.
 3. Open the **Identity** tab to copy your public key or show its QR code.
 4. To share offline, use **Share with Identity** on a vault file and send the `.cvlt` container.
@@ -423,9 +427,11 @@ File access uses the Storage Access Framework, so no broad storage permission is
 The project uses `flutter_test` and includes unit and widget tests for:
 
 - Container encryption, decryption, tamper detection, and multi-chunk files.
+- Argon2id known-answer vector, parameter validation, and AAD parameter binding.
+- Seed record wrapping, passphrase rotation, and wrong-passphrase rejection.
 - Recipient key slots and identity-based opening.
 - Vault index recovery and pending-lock journal behavior.
-- Seed/session handling and lock access rules.
+- Seed record wrapping, passphrase rotation, and session/lock access rules.
 - QR payload validation, size caps, expiry, and malformed input.
 - XEdDSA auth, proof-of-possession, and manifest signature verification.
 - Vault page behavior, including received-file handling.
@@ -437,7 +443,7 @@ flutter analyze
 flutter test
 ```
 
-At the time of writing, the suite contains **125 passing tests**. Tests do not exercise real WebRTC connections; those require two devices.
+At the time of writing, the suite contains **144 passing tests**. Tests do not exercise real WebRTC connections; those require two devices.
 
 ---
 
@@ -447,7 +453,8 @@ At the time of writing, the suite contains **125 passing tests**. Tests do not e
 - **Unaudited cryptography.** The Curve256189 implementation and protocol design have not received a formal security audit.
 - **Side-channel resistance is not guaranteed.** Dart `BigInt` arithmetic is not constant-time. This is acceptable for an experimental project but not for a hardened production wallet.
 - **No forward secrecy for stored files.** All containers are protected by keys derived from the same master seed. Compromising the seed compromises every locked file.
-- **PBKDF2, not Argon2id.** The passphrase KDF is intentionally simple and mobile-friendly, but it is not memory-hard.
+- **Pure-Dart Argon2id.** The passphrase KDF uses the `pointycastle` Argon2id implementation, which is slower than native `libargon2` on low-end devices. Parameters are fixed at the OWASP minimum (19 MiB, 2 passes) and are not yet calibrated per device.
+- **No migration from the old PBKDF2 seed format.** Devices that still hold a pre-Argon2id seed record must create a new passphrase or restore an exported 32-byte master seed.
 - **External network dependency.** P2P transfers rely on public STUN servers and, when needed, a TURN relay. The shared OpenRelay fallback is best-effort; remote reliability depends on supplying a TURN server with `--dart-define`.
 - **Transfer reliability depends on the OS.** The foreground service and partial wakelock cover normal backgrounding, but aggressive battery optimization, vendor task killers, or process death can still interrupt a long transfer.
 - **No formal protocol versioning migration yet.** The QR payload, manifest, and container formats are versioned (`cvlt1`, manifest `v1`, `CFV1`), but automatic migration between future versions is not implemented.
@@ -458,7 +465,7 @@ At the time of writing, the suite contains **125 passing tests**. Tests do not e
 
 Possible next steps, in no particular order:
 
-- Replace PBKDF2 with Argon2id.
+- Calibrate Argon2id parameters per device, or move to native `libargon2`, to keep unlock fast on low-end hardware.
 - Hardware-backed key wrapping with Android Keystore/StrongBox.
 - iOS and desktop support for the vault and transfer flows.
 - Animated/multi-frame QR codes for larger connection payloads.

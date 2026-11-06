@@ -293,10 +293,13 @@ class _IdentityPageState extends State<IdentityPage> {
                             final newPass = newCtrl.text.trim();
                             final confirm = confirmCtrl.text.trim();
 
-                            if (newPass.length < 8) {
+                            if (newPass.length <
+                                SeedService.minPassphraseLength) {
                               setDialogState(() {
                                 errorText =
-                                    'New passphrase must be at least 8 characters';
+                                    'New passphrase must be at least '
+                                    '${SeedService.minPassphraseLength} '
+                                    'characters';
                               });
                               return;
                             }
