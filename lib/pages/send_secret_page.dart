@@ -401,6 +401,21 @@ class _SendSecretPageState extends State<SendSecretPage> {
                 ),
               ),
             ),
+            if (!sender.relayAvailable)
+              const Padding(
+                padding: EdgeInsets.fromLTRB(20, 12, 20, 0),
+                child: Text(
+                  'No TURN relay was found. This is fine on the same Wi-Fi, but '
+                  'a friend on another network may not be able to connect. For '
+                  'remote transfers, use a build configured with a TURN server.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: Colors.orangeAccent,
+                    fontSize: 12,
+                    height: 1.35,
+                  ),
+                ),
+              ),
             if (_error != null)
               Padding(
                 padding: const EdgeInsets.fromLTRB(20, 14, 20, 0),

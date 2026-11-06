@@ -114,7 +114,8 @@ Bulk file content is intentionally **not** pushed through the curve code. Each f
 - Files move directly between devices over an encrypted WebRTC data channel. No project server is involved.
 - XEdDSA authentication and a proof of possession are verified **before any file bytes are sent**.
 - A signed manifest binds the session, both identities, the file size, and the SHA-256 hash of the container.
-- Transfers continue while the app is in the background thanks to an Android foreground service and wakelock.
+- Transfers continue while the app is in the background thanks to an Android foreground service, a partial wakelock, and the active-session guard.
+- If no TURN relay candidate is available, the QR screen warns that remote transfers may fail and suggests the same Wi-Fi network or a build with a private TURN server.
 - If the vault auto-locks, the Vault page offers **Resume** after unlock; the active session is not discarded.
 - QR expiry applies only to the connection handshake. The file transfer itself is not time-limited.
 
@@ -190,7 +191,7 @@ Sender                                           Recipient
 
 ### Peer-to-peer transfer
 
-The QR code carries connection data only: `cvlt1.` + base64url(gzip(JSON)) with `v`, `t`, `sid`, `from`, `exp`, and `sdp`. ICE candidates are gathered before the QR is generated, so no trickle signaling is required.
+The QR code carries connection data only: `cvlt1.` + base64url(gzip(JSON)) with `v`, `t`, `sid`, `from`, `exp`, and `sdp`. ICE candidates are gathered before the QR is generated, so no trickle signaling is required. Gathering waits up to 15 seconds so a TURN relay allocation has time to finish before the SDP is frozen.
 
 ```text
 Sender                                          Receiver
@@ -214,7 +215,8 @@ Sender                                          Receiver
 
 - Two ordered data channels: `ctrl` for JSON control messages and `data` for binary chunks.
 - Backpressure is handled through `bufferedAmount` high/low watermarks.
-- Public STUN servers plus OpenRelay TURN are used for NAT traversal.
+- Public STUN servers are always used. A private TURN server can be compiled in with `--dart-define`; when it is absent, the shared OpenRelay service is used as a best-effort fallback.
+- If a transfer fails during connection setup, the screen explains that the devices may be on incompatible networks and suggests the same Wi-Fi or a TURN-enabled build.
 - The offer QR is unsigned (so it stays small enough for one QR code); identity is proven by the signed `auth`/`pop` exchange before any bytes are sent.
 - The receiver writes a signed sidecar manifest next to the container before acknowledging, so an interrupted import can be completed after the next unlock.
 
@@ -314,7 +316,7 @@ lib/
 │   ├── seed_service.dart         # Seed generation, protection, biometrics
 │   ├── native_storage.dart       # SAF, share, open, foreground service bridge
 │   ├── app_lock.dart             # Background auto-lock policy
-│   └── transfer/                 # WebRTC, QR codec, auth, storage, sender/receiver
+│   └── transfer/                 # WebRTC, ICE config, QR codec, auth, storage, sender/receiver
 └── theme/                        # App sizing and theme controller
 
 test/
@@ -327,6 +329,7 @@ test/
 ├── unlock_action_tile_test.dart
 ├── vault_page_test.dart
 ├── transfer_auth_test.dart
+├── transfer_ice_test.dart
 └── transfer_qr_test.dart
 ```
 
@@ -364,6 +367,23 @@ flutter build apk --debug
 # Release build (configure your signing keystore first)
 flutter build apk --release
 ```
+
+#### Configure a TURN server for remote transfers
+
+Direct connections work on the same Wi-Fi, but strict NAT or mobile networks often need a relay. Pass a TURN server at build time; there is no runtime setting and no project backend:
+
+```bash
+flutter build apk --release \
+  --dart-define=CURVE_TURN_URLS="turn:turn.example.com:3478?transport=udp,turn:turn.example.com:5349?transport=tcp" \
+  --dart-define=CURVE_TURN_USERNAME=curve \
+  --dart-define=CURVE_TURN_CREDENTIAL=secret
+```
+
+- Separate multiple URLs with commas or spaces.
+- All three values are required. If any is missing, CurveVault falls back to the shared OpenRelay service.
+- The shared OpenRelay fallback is rate-limited and may be unavailable. For reliable transfers between different networks, use your own TURN server (for example coturn).
+- TURN credentials are compiled into the APK, so treat them as shareable with anyone who has the build. Use a dedicated, rate-limited TURN user.
+- The transfer screen shows a warning when no TURN relay candidate was gathered.
 
 ### Regenerate launcher icons
 
@@ -417,7 +437,7 @@ flutter analyze
 flutter test
 ```
 
-At the time of writing, the suite contains **114 passing tests**. Tests do not exercise real WebRTC connections; those require two devices.
+At the time of writing, the suite contains **125 passing tests**. Tests do not exercise real WebRTC connections; those require two devices.
 
 ---
 
@@ -428,8 +448,8 @@ At the time of writing, the suite contains **114 passing tests**. Tests do not e
 - **Side-channel resistance is not guaranteed.** Dart `BigInt` arithmetic is not constant-time. This is acceptable for an experimental project but not for a hardened production wallet.
 - **No forward secrecy for stored files.** All containers are protected by keys derived from the same master seed. Compromising the seed compromises every locked file.
 - **PBKDF2, not Argon2id.** The passphrase KDF is intentionally simple and mobile-friendly, but it is not memory-hard.
-- **External network dependency.** P2P transfers rely on public STUN and OpenRelay TURN servers for NAT traversal.
-- **Transfer reliability depends on the OS.** Aggressive battery optimization or process death can still interrupt a long transfer.
+- **External network dependency.** P2P transfers rely on public STUN servers and, when needed, a TURN relay. The shared OpenRelay fallback is best-effort; remote reliability depends on supplying a TURN server with `--dart-define`.
+- **Transfer reliability depends on the OS.** The foreground service and partial wakelock cover normal backgrounding, but aggressive battery optimization, vendor task killers, or process death can still interrupt a long transfer.
 - **No formal protocol versioning migration yet.** The QR payload, manifest, and container formats are versioned (`cvlt1`, manifest `v1`, `CFV1`), but automatic migration between future versions is not implemented.
 
 ---

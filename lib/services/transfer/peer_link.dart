@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import '../../models/transfer_session.dart';
+import 'transfer_ice.dart';
 
 /// Small wrapper around a data-only WebRTC peer connection.
 ///
@@ -21,8 +22,19 @@ class PeerLink {
   static const int _bufferedHighWater = 512 * 1024;
   static const int _bufferedLowWater = 128 * 1024;
 
-  static const Duration _gatheringTimeout = Duration(seconds: 8);
+  // TURN allocation can take noticeably longer than STUN on a mobile network.
+  // The extra time makes sure relay candidates make it into the QR before the
+  // SDP is frozen.
+  static const Duration _gatheringTimeout = Duration(seconds: 15);
   static const Duration _channelTimeout = Duration(seconds: 45);
+  static const Duration _failedGracePeriod = Duration(seconds: 15);
+
+  static const String _connectionHelp =
+      'Could not connect to the other device. Check that both phones are '
+      'online, move them to the same Wi-Fi network, or use a build with a '
+      'TURN server.';
+
+  static final RegExp _relayCandidate = RegExp(r'\btyp\s+relay\b');
 
   final RTCPeerConnection _peerConnection;
 
@@ -34,13 +46,24 @@ class PeerLink {
   final StreamController<Uint8List> _dataMessages =
       StreamController<Uint8List>();
   bool _closed = false;
+  bool _failed = false;
+  bool _everConnected = false;
+  bool _relayAvailable = false;
+  Timer? _failedTimer;
 
   Stream<Map<String, dynamic>> get ctrlMessages => _ctrlMessages.stream;
   Stream<Uint8List> get dataMessages => _dataMessages.stream;
   bool get isClosed => _closed;
 
+  /// True when ICE produced a TURN relay candidate for this side.
+  ///
+  /// A missing relay is not fatal on the same network, but it is the usual
+  /// reason a transfer between different networks cannot connect.
+  bool get relayAvailable => _relayAvailable;
+
   static Future<PeerLink> sender() async {
     final link = PeerLink._(await _newPeerConnection());
+    link._watchIceCandidates();
     link._ctrl = await link._peerConnection.createDataChannel(
       ctrlLabel,
       RTCDataChannelInit()..ordered = true,
@@ -56,6 +79,7 @@ class PeerLink {
 
   static Future<PeerLink> receiver() async {
     final link = PeerLink._(await _newPeerConnection());
+    link._watchIceCandidates();
     link._peerConnection.onDataChannel = (channel) {
       switch (channel.label) {
         case ctrlLabel:
@@ -73,33 +97,44 @@ class PeerLink {
 
   static Future<RTCPeerConnection> _newPeerConnection() {
     return createPeerConnection(<String, dynamic>{
-      'iceServers': <Map<String, dynamic>>[
-        {'urls': 'stun:stun.l.google.com:19302'},
-        {'urls': 'stun:stun1.l.google.com:19302'},
-        {'urls': 'stun:stun.cloudflare.com:3478'},
-        {
-          'urls': [
-            'turn:openrelay.metered.ca:80',
-            'turn:openrelay.metered.ca:443',
-            'turn:openrelay.metered.ca:443?transport=tcp',
-          ],
-          'username': 'openrelayproject',
-          'credential': 'openrelayproject',
-        },
-      ],
+      'iceServers': TransferIceConfig.build(),
       'sdpSemantics': 'unified-plan',
       'iceCandidatePoolSize': 10,
     });
   }
 
-  /// Fails pending work as soon as the peer connection dies on its own.
+  void _watchIceCandidates() {
+    _peerConnection.onIceCandidate = (candidate) {
+      final value = candidate.candidate;
+      if (value != null && _relayCandidate.hasMatch(value)) {
+        _relayAvailable = true;
+      }
+    };
+  }
+
+  /// Fails pending work when the peer connection dies on its own.
   ///
-  /// Without this a transfer that loses the other device would keep waiting
-  /// forever (there is deliberately no transfer-duration timeout).
+  /// A `failed` state is not closed immediately while the handshake is still
+  /// running: the other device may not have applied the answer yet, and ICE can
+  /// recover once it starts sending checks. After the link has connected once,
+  /// a failure gets a short grace period so a real transfer cannot hang
+  /// forever.
   void _watchConnection() {
     _peerConnection.onConnectionState = (state) {
-      if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed ||
-          state == RTCPeerConnectionState.RTCPeerConnectionStateClosed) {
+      if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
+        _failed = true;
+        if (_everConnected) {
+          _failedTimer ??= Timer(_failedGracePeriod, () {
+            if (!_closed) unawaited(close());
+          });
+        }
+      } else if (state ==
+          RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
+        _everConnected = true;
+        _failed = false;
+        _failedTimer?.cancel();
+        _failedTimer = null;
+      } else if (state == RTCPeerConnectionState.RTCPeerConnectionStateClosed) {
         unawaited(close());
       }
     };
@@ -180,6 +215,9 @@ class PeerLink {
     if (sdp.isEmpty) {
       throw const TransferException('Could not build a connection offer');
     }
+    if (_relayCandidate.hasMatch(sdp)) {
+      _relayAvailable = true;
+    }
     return sdp;
   }
 
@@ -187,17 +225,17 @@ class PeerLink {
     Duration timeout = _channelTimeout,
   }) async {
     if (_closed) {
-      throw const TransferException('The connection closed');
+      throw TransferException(_closedMessage);
     }
     if (!_channelsReady.isCompleted) {
       try {
         await _channelsReady.future.timeout(timeout);
       } on TimeoutException {
-        throw const TransferException('The connection timed out');
+        throw const TransferException(_connectionHelp);
       }
     }
     if (_closed) {
-      throw const TransferException('The connection closed');
+      throw TransferException(_closedMessage);
     }
 
     final ctrl = _ctrl;
@@ -207,6 +245,10 @@ class PeerLink {
     }
     await Future.wait([_waitOpen(ctrl, timeout), _waitOpen(data, timeout)]);
   }
+
+  String get _closedMessage => _failed
+      ? _connectionHelp
+      : 'The connection closed before the transfer finished';
 
   Future<void> _waitOpen(RTCDataChannel channel, Duration timeout) async {
     if (channel.state == RTCDataChannelState.RTCDataChannelOpen) return;
@@ -228,7 +270,7 @@ class PeerLink {
     try {
       await opened.future.timeout(timeout);
     } on TimeoutException {
-      throw const TransferException('The connection timed out');
+      throw const TransferException(_connectionHelp);
     }
   }
 
@@ -256,7 +298,10 @@ class PeerLink {
       try {
         await low.future.timeout(const Duration(seconds: 30));
       } on TimeoutException {
-        throw const TransferException('The receiver stopped responding');
+        throw const TransferException(
+          'The other device stopped receiving data. Check the connection and '
+          'try again.',
+        );
       } finally {
         channel.onBufferedAmountLow = previous;
       }
@@ -268,6 +313,8 @@ class PeerLink {
   Future<void> close() async {
     if (_closed) return;
     _closed = true;
+    _failedTimer?.cancel();
+    _failedTimer = null;
     if (!_channelsReady.isCompleted) {
       // Complete normally so an early cancel does not leave an unobserved
       // error behind; waitForChannels checks _closed instead.

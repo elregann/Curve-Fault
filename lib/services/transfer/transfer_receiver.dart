@@ -58,6 +58,7 @@ class TransferReceiver extends ChangeNotifier {
   int get totalBytes => _totalBytes;
   int get fileSize => _fileSize;
   String? get fileName => _fileName;
+  bool get relayAvailable => _link?.relayAvailable ?? false;
   bool get isActive =>
       _phase == TransferPhase.preparing ||
       _phase == TransferPhase.waitingConnection ||
